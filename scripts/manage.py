@@ -80,7 +80,7 @@ def render(cfg, directory):
         rules = [{'auth_user': ['home'], 'ip_cidr': ['127.0.0.1/32'], 'port': [control], 'action': 'route', 'outbound': 'direct'},
                  {'auth_user': ['app'], 'ip_cidr': ['127.0.0.1/32'], 'port': [s['remotePort'] for s in items], 'action': 'route', 'outbound': 'direct'},
                  {'action': 'reject'}]
-        sing = {'log': {'level': 'warn', 'timestamp': True},
+        sing = {'log': {'level': cfg.get('logLevel','warn'), 'timestamp': True},
                 'inbounds': [{'type': 'vless', 'tag': 'proxy', 'listen': cfg.get('listen', '0.0.0.0'), 'listen_port': port(proxy['port']),
                               'users': [{'name': u, 'uuid': proxy[u+'UUID']} for u in ['app','home']],
                               'tls': {'enabled': True, 'certificate_path': str(Path(proxy['certificatePath']).resolve()), 'key_path': str(Path(proxy['keyPath']).resolve())}}],
@@ -90,10 +90,10 @@ def render(cfg, directory):
             'transport.tls.force = true', f'transport.tls.certFile = {q(str(Path(cfg["frpCertificatePath"]).resolve()))}',
             f'transport.tls.keyFile = {q(str(Path(cfg["frpKeyPath"]).resolve()))}',
             'allowPorts = [' + ', '.join('{ single = '+str(s['remotePort'])+' }' for s in items) + ']',
-            'log.to = "console"', 'log.level = "warn"', ''])
+            'log.to = "console"', 'log.level = '+q(cfg.get('logLevel','warn')), ''])
     else:
         socks = port(cfg.get('socksPort',1080))
-        sing = {'log': {'level': 'warn', 'timestamp': True},
+        sing = {'log': {'level': cfg.get('logLevel','warn'), 'timestamp': True},
                 'inbounds': [{'type': 'socks', 'listen': '127.0.0.1', 'listen_port': socks}],
                 'outbounds': [outbound(cfg, 'home')], 'route': {'final': 'relay'}}
         frp = '\n'.join(['serverAddr = "127.0.0.1"', f'serverPort = {control}', 'loginFailExit = false',
@@ -101,7 +101,7 @@ def render(cfg, directory):
             'transport.protocol = "tcp"', f'transport.proxyURL = "socks5://127.0.0.1:{socks}"',
             'transport.tls.enable = true', f'transport.tls.serverName = {q(cfg["frpServerName"])}',
             f'transport.tls.trustedCaFile = {q(str(Path(cfg["frpCAPath"]).resolve()))}',
-            'log.to = "console"', 'log.level = "warn"', ''])
+            'log.to = "console"', 'log.level = '+q(cfg.get('logLevel','warn')), ''])
         for s in items:
             host = s['localHost']
             if not host or any(c in host for c in '/\\\n'):
@@ -241,6 +241,52 @@ def install(cfg, prefix):
             (prefix/'current').unlink(missing_ok=True)
         raise
 
+def logical_store(path):
+    import importlib.util
+    spec=importlib.util.spec_from_file_location('logical_configuration',ROOT/'manager/configuration.py')
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    if path.name != ROLE+'.json':raise ValueError('logical config must use the canonical role filename')
+    return module.Configuration(path.parent,ROLE,repository=ROOT),module
+
+def deployment_config(path):
+    raw=json.loads(path.read_text())
+    if 'schemaVersion' not in raw:return raw # explicit legacy compatibility
+    store,_=logical_store(path)
+    return store.materialize(store.load(),store.secrets())
+
+def install_from_file(path,prefix):
+    raw=json.loads(path.read_text())
+    if 'schemaVersion' not in raw:return install(raw,prefix)
+    store,module=logical_store(path)
+    with store.lock():
+        logical=store.load()
+        statefile=store.directory/'status.json'
+        state=module.read(statefile) if statefile.exists() else {'appliedRevision':None,'error':None}
+        try:install(store.materialize(logical,store.secrets()),prefix)
+        except BaseException:
+            # Same contract as the Web apply: saved but not effective.
+            module.atomic(statefile,{**state,'error':'applyFailed','failedRevision':logical['revision']})
+            raise
+        module.atomic((prefix/'current').resolve()/'logical.json',logical)
+        module.atomic(store.directory/'last-good.json',logical)
+        module.atomic(store.directory/'status.json',{'appliedRevision':logical['revision'],'error':None,'appliedAt':int(time.time())})
+
+def rollback_runtime(prefix,path):
+    store=None;module=None
+    if path.exists() and 'schemaVersion' in json.loads(path.read_text()):store,module=logical_store(path)
+    import contextlib
+    with store.lock() if store else contextlib.nullcontext():
+        previous=prefix/'previous'
+        if not previous.exists():raise ValueError('no previous release')
+        target=previous.resolve()
+        link=prefix/'restore';link.unlink(missing_ok=True);link.symlink_to(target);link.replace(prefix/'current');systemctl('restart')
+        if store:
+            manifest=target/'logical.json'
+            if manifest.exists():
+                logical=module.read(manifest);module.atomic(store.directory/'last-good.json',logical)
+                module.atomic(store.directory/'status.json',{'appliedRevision':logical['revision'],'error':None,'appliedAt':int(time.time())})
+            else:module.atomic(store.directory/'status.json',{'appliedRevision':None,'error':'legacyRuntimeRolledBack'})
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['render','check','install','update','start','stop','status','rollback','uninstall','wait-socks'])
@@ -250,18 +296,15 @@ def main():
     parser.add_argument('--prefix',type=Path,default=Path('/opt/openplayx-'+ROLE))
     parser.add_argument('--port',type=int,default=1080)
     args = parser.parse_args()
-    if args.action == 'render': render(json.loads(args.config.read_text()),args.output)
+    if args.action == 'render': render(deployment_config(args.config),args.output)
     elif args.action == 'check': check(args.output.resolve(),args.bin.resolve())
-    elif args.action in ['install','update']: install(json.loads(args.config.read_text()), args.prefix.resolve())
+    elif args.action in ['install','update']: install_from_file(args.config,args.prefix.resolve())
     elif args.action == 'wait-socks':
         config=args.output/'sing-box.json'
         number=json.loads(config.read_text())['inbounds'][0]['listen_port'] if config.exists() else args.port
         wait_socks(port(number))
     elif args.action in ['start','stop','status']: systemctl({'start':'restart','status':'status'}.get(args.action,args.action))
-    elif args.action == 'rollback':
-        previous=args.prefix/'previous'
-        if not previous.exists(): raise ValueError('no previous release')
-        link=args.prefix/'restore'; link.symlink_to(previous.resolve()); link.replace(args.prefix/'current'); systemctl('restart')
+    elif args.action == 'rollback':rollback_runtime(args.prefix,args.config)
     elif args.action == 'uninstall':
         systemctl('disable'); systemctl('stop')
         for name in ['sing-box',FRP]: Path('/etc/systemd/system',f'openplayx-{ROLE}-{name}.service').unlink(missing_ok=True)

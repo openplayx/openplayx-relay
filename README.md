@@ -14,7 +14,9 @@ python3 scripts/pair.py --host relay.example.com --tls-name relay.example.com \
   --key /etc/letsencrypt/live/relay.example.com/privkey.pem
 # 私有 CA：另加 --proxy-ca /path/to/ca.pem；不允许关闭证书校验。
 # 生成目录已存在会拒绝执行，不隐式轮换密钥。
-sudo python3 scripts/manage.py install --config secrets/deployment.json
+# 将生成的 secrets/relay/ 放到 /var/lib/openplayx-relay/；已有目录时请勿覆盖。
+sudo python3 scripts/manage.py install --config /var/lib/openplayx-relay/relay.json
+sudo python3 manager/install.py
 sudo python3 scripts/manage.py status
 ```
 
@@ -22,9 +24,9 @@ sudo python3 scripts/manage.py status
 
 配对文件都包含凭据，须通过可信渠道分别传递：
 
-- `secrets/home.json` 与 `secrets/frps.crt` 交给家庭端；在 home.json 修改家庭目标 IP、端口及证书路径，**不要**传递 `frps.key`。
-- `secrets/app-jellyfin.json` 导入 OpenPlayX 的来源编辑表单“家庭远程访问”。默认 Jellyfin；Emby 修改对应逻辑端点；SMB 可设 `smb://nas.home.invalid/Media` 并在两端分配映射端口。
-- `secrets/deployment.json`、`frps.key`、代理私钥只保留在 VPS。
+- 整个 `secrets/home/` 目录交给家庭端；其中只有 Home 配置、Home 专属机密、授权和 frps 公共证书，不包含 Relay 私钥或 App UUID。将目录放到家庭端私有持久目录后，通过 Home Web 表单修改家庭目标地址与端口。
+- `secrets/app-jellyfin.json` 导入 OpenPlayX“设置 → 远程访问”的来源连接表单（新来源仍兼容原配对入口）。默认 Jellyfin；Emby 修改对应逻辑端点；SMB 可设 `smb://nas.home.invalid/Media` 并在两端分配映射端口。
+- `secrets/relay/` 目录及代理私钥只保留在 VPS；实际密钥位于该目录的 secrets.json 与受控 tls/ 资产中。
 
 默认映射 `jellyfin / 18096`，家庭服务地址 `192.168.50.10:8096` 只是待修改的示例。更多映射须同时修改 relay/home 的 services 和相应 App 配对；不重复或占用控制/代理端口。家庭 IP 只写入家庭配置，不写 App 的远程端点。
 
@@ -35,8 +37,8 @@ sudo python3 scripts/manage.py status
 ```bash
 sudo python3 scripts/manage.py stop
 sudo python3 scripts/manage.py start
-sudo python3 scripts/manage.py update --config secrets/deployment.json
-sudo python3 scripts/manage.py rollback
+sudo python3 scripts/manage.py update --config /var/lib/openplayx-relay/relay.json
+sudo python3 scripts/manage.py rollback --config /var/lib/openplayx-relay/relay.json
 sudo python3 scripts/manage.py uninstall
 ```
 
@@ -45,7 +47,7 @@ sudo python3 scripts/manage.py uninstall
 不安装时可独立生成与检查配置：
 
 ```bash
-python3 scripts/manage.py render --config secrets/deployment.json --output generated
+python3 scripts/manage.py render --config /var/lib/openplayx-relay/relay.json --output generated
 python3 scripts/manage.py check --output generated --bin /path/to/upstream/bin
 python3 -m unittest discover -s tests
 python3 -u tests/e2e.py --bin /path/to/upstream/bin \
@@ -59,3 +61,7 @@ python3 -u tests/e2e.py --bin /path/to/upstream/bin \
 ## 上游与许可证
 
 此仓库是独立部署工程，不复制上游代理源码。sing-box 为 GPL-3.0-or-later，附命名限制；frp 为 Apache-2.0。实际分发二进制时须附上所选版本的许可证及适用源代码，见 [sing-box](https://github.com/SagerNet/sing-box/tree/v1.12.12)、[frp](https://github.com/fatedier/frp/tree/v0.65.0)。配置字段以这些固定版本为准，不自动套用最新版文档。
+
+## Web 配置管理
+
+已提供类型化 Web 表单、管理员登录、草稿校验与测试、保存/应用分离、状态、脱敏导出和备份/损坏恢复。权威配置为 `relay.json`，实际 UUID/token 仅存于私有 `secrets.json`。旧 `deployment.json` 仅作为显式迁移输入，不再是 Web 管理的权威源。启动、迁移、权限与验证说明见 [docs/configuration.md](docs/configuration.md)。

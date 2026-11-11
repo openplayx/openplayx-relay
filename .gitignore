@@ -4,3 +4,17 @@ bin/
 secrets/
 __pycache__/
 *.pyc
+
+# Private management state
+/relay.json
+/secrets.json
+/admin.json
+/status.json
+/last-good.json
+/revision.json
+/grants.json
+/bootstrap-token
+/bootstrap.json
+/tls/
+/*.backup.json
+/*.damaged.*.json

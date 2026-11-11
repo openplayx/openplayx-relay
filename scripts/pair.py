@@ -2,6 +2,7 @@
 """Create one-household config and pairing bundles, without replacing secrets."""
 import argparse
 import json
+import importlib.util
 import os
 from pathlib import Path
 import secrets
@@ -32,16 +33,28 @@ proxy={'host':a.host,'port':a.port,'serverName':a.tls_name,'appUUID':str(uuid.uu
  'certificatePath':str(a.certificate.resolve()),'keyPath':str(a.key.resolve())}
 if a.proxy_ca: proxy['caCertificate']=a.proxy_ca.read_text()
 token=secrets.token_urlsafe(48)
+home_id='home-'+str(uuid.uuid4())
+line_id='line-'+str(uuid.uuid4())
 service={'id':'jellyfin','remotePort':18096}
-write('deployment.json',{'proxy':proxy,'frpToken':token,'controlPort':7000,'services':[service],
+write('.legacy-relay.json',{'homeId':home_id,'proxy':proxy,'frpToken':token,'controlPort':7000,'services':[service],
  'frpCertificatePath':str(root/'frps.crt'),'frpKeyPath':str(root/'frps.key')})
 homeproxy={k:v for k,v in proxy.items() if k not in ['appUUID','certificatePath','keyPath']}
-write('home.json',{'proxy':homeproxy,'frpToken':token,'controlPort':7000,'socksPort':1080,
+write('.legacy-home.json',{'homeId':home_id,'proxy':homeproxy,'frpToken':token,'controlPort':7000,'socksPort':1080,
  'frpServerName':'openplayx-frps','frpCAPath':str(root/'frps.crt'),
  'services':[{**service,'localHost':'192.168.50.10','localPort':8096}]})
 tls={'enabled':True,'server_name':a.tls_name}
 if a.proxy_ca: tls['certificate']=a.proxy_ca.read_text()
-write('app-jellyfin.json',{'version':1,'lineId':str(uuid.uuid4()),'homeId':str(uuid.uuid4()),'serviceId':'jellyfin',
+write('app-jellyfin.json',{'version':1,'lineId':line_id,'homeId':home_id,'serviceId':'jellyfin',
  'remotePort':18096,'remoteAddress':'http://jellyfin.home.invalid:8096',
  'outbound':{'type':'vless','server':a.host,'server_port':a.port,'uuid':proxy['appUUID'],'tls':tls}})
-print('Created private deployment, home and App pairing files in',root)
+repository=Path(__file__).resolve().parents[1]
+spec=importlib.util.spec_from_file_location('pairing_configuration',repository/'manager/configuration.py')
+module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+for role in ['relay','home']:
+    store=module.Configuration(root/role,role,repository=repository)
+    store.import_legacy(root/('.legacy-'+role+'.json'),home_id)
+# Each side receives its own directory; Home never receives the App identity
+# or relay private keys. Transient plaintext import files are not authority.
+for name in ['.legacy-relay.json','.legacy-home.json','frps.key','frps.crt']:
+    (root/name).unlink()
+print('Created canonical relay/ and home/ configuration directories and App pairing in',root)
