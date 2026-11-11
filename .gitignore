@@ -1,0 +1,6 @@
+deployment.json
+generated/
+bin/
+secrets/
+__pycache__/
+*.pyc
