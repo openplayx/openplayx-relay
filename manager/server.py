@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Loopback-first configuration API. No arbitrary commands or filesystem API."""
+"""Role-scoped configuration API. Home permits authenticated LAN access."""
 import argparse
 import hashlib
 import hmac
@@ -17,7 +17,8 @@ import sys
 import threading
 import time
 
-from configuration import Configuration, ConfigError, atomic, read
+from configuration import Configuration, ConfigError, atomic, read, is_lan_address
+from urllib.parse import urlsplit
 
 ROOT=Path(__file__).resolve().parents[1]
 ROLE=(ROOT/'ROLE').read_text().strip()
@@ -96,6 +97,21 @@ class Server(ThreadingHTTPServer):
         port=self.server_address[1]
         return {self.scheme+'://'+('['+h+']' if ':'in h else h)+('' if port==({'http':80,'https':443}[self.scheme]) else ':'+str(port)) for h in self.management['allowedHosts']}
 
+    def request_origins(self,peer,local,authority):
+        origins=self.origins
+        if ROLE!='home':return origins
+        if not is_lan_address(peer) or not is_lan_address(local):raise ConfigError('lanOnly','Home 管理页只允许家庭局域网访问。',403)
+        # Accept a literal IP only when it is the actual destination interface
+        # of this connection. Never allow arbitrary Host values or LAN wildcards.
+        try:
+            url=urlsplit(authority)
+            number=url.port or (443 if self.scheme=='https' else 80)
+            if (not url.username and not url.password and not url.path and not url.query and not url.fragment
+                and number==self.server_address[1] and ipaddress.ip_address(url.hostname)==ipaddress.ip_address(local)):
+                origins=origins|{authority}
+        except (ValueError,TypeError):pass
+        return origins
+
 class Handler(BaseHTTPRequestHandler):
     server_version='OpenPlayXManager'
     protocol_version='HTTP/1.1'
@@ -112,11 +128,13 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers();self.wfile.write(data)
     def origin(self,write=False):
         origin=self.headers.get('Origin')
+        if len(self.headers.get_all('Host',[]))!=1:raise ConfigError('originDenied','Host 头无效。',403)
         authority=self.server.scheme+'://'+self.headers.get('Host','')
-        if authority not in self.server.origins:raise ConfigError('originDenied','请求来源不允许。',403)
+        origins=self.server.request_origins(self.client_address[0],self.connection.getsockname()[0],authority)
+        if authority not in origins:raise ConfigError('originDenied','请求来源不允许。',403)
         if not write and self.path in ['/','/app.js','/style.css']:return
         if self.headers.get('Sec-Fetch-Site')=='cross-site':raise ConfigError('originDenied','请求来源不允许。',403)
-        if (write and origin is None) or (origin is not None and origin not in self.server.origins):raise ConfigError('originDenied','请求来源不允许。',403)
+        if (write and origin is None) or (origin is not None and (origin not in origins or (ROLE=='home' and origin!=authority))):raise ConfigError('originDenied','请求来源不允许。',403)
     def body(self):
         if self.headers.get('Transfer-Encoding') or self.headers.get('Content-Type','').split(';')[0]!='application/json':raise ConfigError('invalidRequest','请求必须是有长度的 JSON。',415)
         try:length=int(self.headers.get('Content-Length','0'))
@@ -198,23 +216,29 @@ def main():
     parser.add_argument('--import-legacy',type=Path,help='Local-only initial import; never overwrites existing JSON')
     parser.add_argument('--home-id')
     parser.add_argument('--renew-bootstrap',action='store_true')
+    parser.add_argument('--enable-lan',action='store_true',help='Home only: explicitly save LAN management access for an existing configuration')
     args=parser.parse_args();os.umask(0o077)
     store=Configuration(args.config_dir,ROLE,binaries=args.bin_dir,prefix=args.runtime_prefix)
     if args.import_legacy:
         store.import_legacy(args.import_legacy,args.home_id)
         print('Imported into',store.path,'; not applied.');return
+    if args.enable_lan:
+        if ROLE!='home':parser.error('--enable-lan is only supported by Home')
+        cfg=store.enable_lan();print('Saved Home LAN management access on port',cfg['management']['port'],'; restart the manager service to use it.');return
     admin=Admin(store.directory);admin.bootstrap(args.renew_bootstrap)
     if args.renew_bootstrap:print('Renewed local bootstrap credential file; expires in 15 minutes.');return
     try:
         cfg=store.load();management=cfg['management']
-        if not ipaddress.ip_address(management['listen']).is_loopback:store.validate(cfg,store.secrets())
+        if ROLE=='home':store.validate_management(management)
+        elif not ipaddress.ip_address(management['listen']).is_loopback:store.validate(cfg,store.secrets())
     except (ConfigError,KeyError,TypeError,ValueError):
         # Recovery uses a fixed safe loopback listener, never guessed public
         # settings, and never writes defaults over the unrecognized file.
-        management=store.blank()['management']
+        management={**store.blank()['management'],'listen':'127.0.0.1'}
         print('Configuration unavailable; using authenticated loopback recovery. Original files preserved.')
     server=Server(store,management)
     print('OpenPlayX',ROLE,'manager:',server.scheme+'://'+management['listen']+':'+str(management['port']))
+    if ROLE=='home' and management['listen'] in ['0.0.0.0','::']:print('LAN access:',server.scheme+'://<Home LAN IP>:'+str(management['port']))
     if (store.directory/'bootstrap-token').exists():print('Read local bootstrap-token in the private config directory to sign in (15 minute expiry).')
     try:server.serve_forever()
     except KeyboardInterrupt:pass

@@ -7,6 +7,8 @@ import platform
 import shutil
 import subprocess
 
+from configuration import Configuration
+
 ROOT=Path(__file__).resolve().parents[1]
 ROLE=(ROOT/'ROLE').read_text().strip()
 def main():
@@ -14,7 +16,9 @@ def main():
     p.add_argument('--config-dir',type=Path,default=Path('/var/lib/openplayx-'+ROLE))
     p.add_argument('--prefix',type=Path,default=Path('/opt/openplayx-'+ROLE))
     p.add_argument('--uninstall',action='store_true')
+    p.add_argument('--enable-lan',action='store_true',help='Home only: migrate an existing loopback configuration to LAN access')
     args=p.parse_args()
+    if args.enable_lan and (ROLE!='home' or args.uninstall):p.error('--enable-lan is only supported when installing Home')
     if platform.system()!='Linux' or os.geteuid()!=0:p.error('requires Linux, systemd and root')
     directory=args.config_dir.resolve();prefix=args.prefix.resolve()
     if any(c.isspace() for c in str(directory)+str(prefix)):p.error('paths cannot contain whitespace')
@@ -25,6 +29,7 @@ def main():
         print('Manager service removed. Configuration, secrets and runtime data preserved.');return
     os.umask(0o077)
     directory.mkdir(parents=True,exist_ok=True);directory.chmod(0o700);os.chown(directory,0,0)
+    if args.enable_lan:Configuration(directory,ROLE,repository=ROOT,prefix=prefix).enable_lan()
     code=prefix/'management';code.mkdir(parents=True,exist_ok=True)
     for name in ['manager','web','scripts']:
         shutil.copytree(ROOT/name,code/name,dirs_exist_ok=True,ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
@@ -60,5 +65,5 @@ WantedBy=multi-user.target
     subprocess.run(['systemctl','enable',unit],check=True)
     subprocess.run(['systemctl','restart',unit],check=True)
     subprocess.run(['systemctl','is-active','--quiet',unit],check=True)
-    print('Installed loopback-first manager. Read bootstrap-token in',directory,'if no administrator password has been set.')
+    print('Installed '+('LAN-accessible Home' if ROLE=='home' else 'loopback-first Relay')+' manager. Read bootstrap-token in',directory,'if no administrator password has been set.')
 if __name__=='__main__':main()

@@ -16,6 +16,7 @@ class PairingTest(unittest.TestCase):
    relay_secrets=json.loads((p/'paired/relay/secrets.json').read_text());home_secrets=json.loads((p/'paired/home/secrets.json').read_text())
    self.assertEqual(relay_secrets[cfg['proxy']['appCredentialRef']],app['outbound']['uuid'])
    self.assertEqual(relay_secrets[cfg['proxy']['homeCredentialRef']],home_secrets[home['proxy']['homeCredentialRef']])
+   self.assertEqual(home['management']['listen'],'0.0.0.0');self.assertEqual(cfg['management']['listen'],'127.0.0.1')
    self.assertEqual(cfg['homeId'],home['homeId']);self.assertEqual(cfg['homeId'],app['homeId'])
    self.assertNotIn('appCredentialRef',home['proxy']);self.assertNotIn(app['outbound']['uuid'],home_secrets.values());self.assertNotIn('frpToken',app)
    self.assertFalse((p/'paired/deployment.json').exists());self.assertFalse((p/'paired/frps.key').exists())

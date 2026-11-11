@@ -52,16 +52,16 @@ sudo python3 manager/install.py --uninstall
 
 安装器将代码和 Web 资源复制到 `/opt/openplayx-relay/management/`，并安装专用 systemd 单元。管理器以本机 root 身份执行固定的组件重启操作，使用 ProtectSystem/ProtectHome 等限制，写入范围限定到本端持久目录与运行前缀。API 不接受命令、可执行文件路径或任意目标文件路径。本次没有在真实 Linux 主机执行安装器。
 
-默认页面：Relay `http://127.0.0.1:9081`，Home `http://127.0.0.1:9080`。首次通过本机终端读取私有目录的 bootstrap-token 登录，15 分钟后过期。需要重新发放时在本机执行 `manager/server.py --config-dir ... --renew-bootstrap`。初始化后请设置至少 16 字符的管理员密码。
+默认页面：Relay `http://127.0.0.1:9081`，Home `http://<Home局域网IP>:9080`（监听 0.0.0.0）。首次通过本机终端读取私有目录的 bootstrap-token 登录，15 分钟后过期。需要重新发放时在本机执行 `manager/server.py --config-dir ... --renew-bootstrap`。初始化后请设置至少 16 字符的管理员密码。
 
-推荐从本机或 SSH 端口转发访问。若转发到不同本地端口，需要确保浏览器 Host 位于管理配置允许的来源中；默认同号转发最简单。
+Relay 推荐从本机或 SSH 端口转发访问；Home 默认在家庭局域网内通过 IP 直接访问。若转发到不同本地端口，需要确保浏览器 Host 位于管理配置允许的来源中；默认同号转发最简单。
 
 ```bash
 # Relay 示例
 ssh -L 9081:127.0.0.1:9081 user@relay.example.com
 ```
 
-Home 扩展到 LAN 要明确修改 listen、allowedHosts 并先设置管理员密码；Relay 非回环或任何公网管理还必须配置 HTTPS。修改管理监听后，页面只保存，不自行重启管理服务；在本机重启管理服务后再应用组件配置，避免页面把旧监听状态误报成已生效。
+Home 默认允许局域网 IP 直连，仍需管理员密码或短期初始化凭据；只接受回环/家庭私有网段请求。实际到达本机接口的字面 IP 自动允许，其他主机名仍须列在 allowedHosts。Home 写请求的 Origin 必须与当前 Host 精确一致。Relay 非回环管理仍必须配置 HTTPS 和管理员密码。修改管理监听后，页面只保存，不自行重启管理服务；在本机重启管理服务后再应用组件配置，避免页面把旧监听状态误报成已生效。
 
 ## 使用流程
 
@@ -94,3 +94,5 @@ python3 -m unittest discover -s tests
 ```
 
 测试覆盖机密不出现在普通 JSON/API、修订冲突、备份恢复、未知/损坏文件保护、哈希恢复、端口/路径/授权拒绝、登录/CSRF/跨域限制和应用失败回退。Relay 的 e2e.py 可加 `--managed-json`，验证由角色权威 JSON 与机密文件生成的真实 sing-box/frp 媒体链路。
+
+已有 Home 回环配置可在 Home 仓库使用 `sudo python3 manager/install.py --enable-lan`，显式保存新修订、更新管理代码并重启服务。手动部署使用 `manager/server.py --config-dir ... --enable-lan` 后重启管理进程。该选项仅作用于 Home；Relay 默认回环保持不变。主机防火墙仅放行家庭网段的 TCP 9080，不做路由器公网端口映射。

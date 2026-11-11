@@ -71,6 +71,15 @@ def identifier(value):
         raise ConfigError('invalidId','ID 仅支持字母、数字、短横线、下划线。')
     return value
 
+# Explicit LAN ranges; is_private also includes reserved/documentation addresses.
+def is_lan_address(value):
+    try:
+        address=ipaddress.ip_address(value)
+        if isinstance(address,ipaddress.IPv6Address) and address.ipv4_mapped:address=address.ipv4_mapped
+        return address.is_loopback or any(address in ipaddress.ip_network(network) for network in [
+            '10.0.0.0/8','172.16.0.0/12','192.168.0.0/16','169.254.0.0/16','fc00::/7','fe80::/10'])
+    except (ValueError,TypeError):return False
+
 class Configuration:
     def __init__(self, directory, role, repository=None, binaries=None, prefix=None, controller=None):
         self.directory=Path(directory).resolve(); self.role=role
@@ -97,7 +106,7 @@ class Configuration:
           'proxy':{'host':'relay.example.com','port':443,'serverName':'relay.example.com','protocol':'vless-tls','homeCredentialRef':''},
           'frp':{'controlPort':7000,'credentialRef':'','serverName':'openplayx-frps'},
           'services':[], 'log':{'level':'warn'},
-          'management':{'listen':'127.0.0.1','port':9081 if self.role=='relay' else 9080,'https':False,'allowedHosts':['localhost','127.0.0.1']}}
+          'management':{'listen':'127.0.0.1' if self.role=='relay' else '0.0.0.0','port':9081 if self.role=='relay' else 9080,'https':False,'allowedHosts':['localhost','127.0.0.1']}}
         if self.role=='relay':
             common['proxy'].update(appCredentialRef='',listen='0.0.0.0',certificateFile='',keyFile='')
             common['frp'].update(certificateFile='',keyFile='')
@@ -173,17 +182,7 @@ class Configuration:
         if self.role=='relay' and values[p['homeCredentialRef']]==values[p['appCredentialRef']]:raise ConfigError('sharedIdentity','App 与家庭端必须使用不同身份。')
         keys(cfg['log'],{'level'},{'level'})
         if cfg['log']['level'] not in ['warn','error','info']:raise ConfigError('invalidLog','日志级别无效。')
-        m=cfg['management'];keys(m,{'listen','port','https','allowedHosts','certificateFile','keyFile'},{'listen','port','https','allowedHosts'})
-        try:listen=ipaddress.ip_address(m['listen'])
-        except ValueError:raise ConfigError('invalidListen','管理监听地址须为明确的 IP。') from None
-        port(m['port'])
-        if type(m['https']) is not bool or not isinstance(m['allowedHosts'],list) or not 1<=len(m['allowedHosts'])<=10:raise ConfigError('invalidManagement','管理页面配置无效。')
-        for name in m['allowedHosts']:host(name)
-        if m['https']:
-            self.tls_path(m.get('certificateFile'));self.tls_path(m.get('keyFile'))
-        if not listen.is_loopback:
-            if not (self.directory/'admin.json').exists():raise ConfigError('adminRequired','非回环管理必须先设置管理员密码。')
-            if (self.role=='relay' or not listen.is_private) and not m['https']:raise ConfigError('httpsRequired','Relay 或公网管理必须开启 HTTPS。')
+        m=cfg['management'];self.validate_management(m)
         used=[p['port'],f['controlPort'],m['port']]
         if self.role=='home':used.append(cfg['singBox']['socksPort'])
         if len(set(used))!=len(used):raise ConfigError('portConflict','组件与管理监听端口冲突。')
@@ -201,6 +200,21 @@ class Configuration:
                 if not grants or [item['serviceId'],number] not in grants['services']:raise ConfigError('unauthorizedMapping','映射未获 Relay 授权；Home 页面不能扩大映射范围。')
                 if item['targetHost'] in ['127.0.0.1','localhost','::1'] and item['targetPort'] in used:raise ConfigError('targetConflict','家庭服务不能指向本机管理或代理端口。')
         return cfg
+
+    def validate_management(self,m):
+        keys(m,{'listen','port','https','allowedHosts','certificateFile','keyFile'},{'listen','port','https','allowedHosts'})
+        try:listen=ipaddress.ip_address(m['listen'])
+        except ValueError:raise ConfigError('invalidListen','管理监听地址须为明确的 IP。') from None
+        port(m['port'])
+        if type(m['https']) is not bool or not isinstance(m['allowedHosts'],list) or not 1<=len(m['allowedHosts'])<=10:raise ConfigError('invalidManagement','管理页面配置无效。')
+        for name in m['allowedHosts']:host(name)
+        if m['https']:
+            self.tls_path(m.get('certificateFile'));self.tls_path(m.get('keyFile'))
+        if self.role=='home':
+            if not (listen.is_unspecified or is_lan_address(listen)):raise ConfigError('lanOnly','Home 管理页仅允许回环或家庭局域网监听。')
+        elif not listen.is_loopback:
+            if not (self.directory/'admin.json').exists():raise ConfigError('adminRequired','非回环管理必须先设置管理员密码。')
+            if (self.role=='relay' or not listen.is_private) and not m['https']:raise ConfigError('httpsRequired','Relay 或公网管理必须开启 HTTPS。')
 
     def materialize(self,cfg,values):
         self.validate(cfg,values)
@@ -397,6 +411,14 @@ class Configuration:
         if os.geteuid()==0:
             import grp
             self.deploy.restrict_release(self.prefix,release,grp.getgrnam('openplayx-'+self.role).gr_gid)
+
+    def enable_lan(self):
+        if self.role!='home':raise ConfigError('homeOnly','局域网直连选项仅用于 Home。')
+        cfg=self.load()
+        if not self.path.exists():return cfg # Fresh installs already use the LAN default.
+        cfg['management']['listen']='0.0.0.0'
+        self.validate_management(cfg['management'])
+        return self.save(cfg,cfg['revision'])
 
     def recovery_info(self):
         if not self.path.exists():raise ConfigError('noConfig','没有待恢复文件。',409)

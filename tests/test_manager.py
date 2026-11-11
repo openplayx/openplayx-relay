@@ -30,6 +30,17 @@ class ManagerTest(unittest.TestCase):
   self.updates={'homeUUID':'11111111-1111-4111-8111-111111111111','frpToken':'test-token-'*6}
   if server.ROLE=='relay':self.updates['appUUID']='22222222-2222-4222-8222-222222222222'
   self.saved=self.store.save(self.cfg,0,self.updates)
+ def test_relay_stays_loopback_and_rejects_home_lan_migration(self):
+  self.assertEqual(self.store.blank()['management']['listen'],'127.0.0.1')
+  before=self.store.path.read_bytes()
+  with self.assertRaises(ConfigError):self.store.enable_lan()
+  self.assertEqual(self.store.path.read_bytes(),before)
+  management=copy.deepcopy(self.saved['management']);management['listen']='0.0.0.0'
+  with self.assertRaises(ConfigError) as error:self.store.validate_management(management)
+  self.assertEqual(error.exception.code,'adminRequired')
+  server.Admin(self.store.directory).password('test-only-administrator-password')
+  with self.assertRaises(ConfigError) as error:self.store.validate_management(management)
+  self.assertEqual(error.exception.code,'httpsRequired')
  def test_secrets_revision_and_backup(self):
   data=self.store.path.read_text()
   for value in self.updates.values():self.assertNotIn(value,data)
