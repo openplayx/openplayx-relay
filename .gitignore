@@ -18,3 +18,4 @@ __pycache__/
 /tls/
 /*.backup.json
 /*.damaged.*.json
+secrets-pki/
