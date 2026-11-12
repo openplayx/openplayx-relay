@@ -51,6 +51,17 @@ class ManagerTest(unittest.TestCase):
   self.store.save(nextcfg,1)
   restored=self.store.restore(2)
   self.assertEqual(restored['revision'],3);self.assertEqual(restored['log']['level'],'warn')
+ def test_shared_tls_port_requires_distinct_same_family_loopback_addresses(self):
+  cfg=copy.deepcopy(self.saved)
+  cfg['proxy']['listen']='127.0.0.1'
+  cfg['management'].update(listen='127.0.0.2',port=443,https=True,certificateFile='tls/proxy.crt',keyFile='tls/proxy.key')
+  self.store.validate(cfg,self.store.secrets())
+  for proxy_ip,manager_ip in [('127.0.0.1','127.0.0.1'),('0.0.0.0','127.0.0.2'),('127.0.0.1','::1')]:
+   invalid=copy.deepcopy(cfg);invalid['proxy']['listen']=proxy_ip;invalid['management']['listen']=manager_ip
+   with self.subTest(proxy=proxy_ip,manager=manager_ip),self.assertRaises(ConfigError):
+    self.store.validate(invalid,self.store.secrets())
+  cfg['frp']['controlPort']=443
+  with self.assertRaises(ConfigError):self.store.validate(cfg,self.store.secrets())
  def test_corrupt_or_future_file_never_overwritten(self):
   self.store.path.write_text('{broken')
   with self.assertRaises(ConfigError):self.store.save(self.saved,1)

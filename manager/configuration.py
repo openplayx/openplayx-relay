@@ -185,7 +185,17 @@ class Configuration:
         m=cfg['management'];self.validate_management(m)
         used=[p['port'],f['controlPort'],m['port']]
         if self.role=='home':used.append(cfg['singBox']['socksPort'])
-        if len(set(used))!=len(used):raise ConfigError('portConflict','组件与管理监听端口冲突。')
+        # A TLS SNI frontend may route one public port to two distinct
+        # loopback addresses. Wildcard, identical and mixed-family listeners
+        # must still be rejected, as must any collision with frps.
+        shared_loopback=False
+        if self.role=='relay' and p['port']==m['port'] and f['controlPort']!=m['port']:
+            try:
+                proxy_ip=ipaddress.ip_address(p['listen']);manager_ip=ipaddress.ip_address(m['listen'])
+                shared_loopback=(proxy_ip.is_loopback and manager_ip.is_loopback
+                    and proxy_ip.version==manager_ip.version and proxy_ip!=manager_ip)
+            except ValueError:pass
+        if len(set(used))!=len(used) and not shared_loopback:raise ConfigError('portConflict','组件与管理监听端口冲突。')
         if not isinstance(cfg['services'],list) or not 1<=len(cfg['services'])<=32:raise ConfigError('invalidServices','请明确配置 1–32 个服务。')
         names=set();numbers=set()
         grants=read(self.directory/'grants.json') if self.role=='home' else None

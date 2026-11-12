@@ -61,6 +61,23 @@ Relay 推荐从本机或 SSH 端口转发访问；Home 默认在家庭局域网�
 ssh -L 9081:127.0.0.1:9081 user@relay.example.com
 ```
 
+### 与代理共用公网 443
+
+支持使用 HAProxy TCP/TLS SNI 分流，模板见 `deploy/haproxy-shared-443.cfg.example`。HAProxy 只绑定服务器实际公网 IPv4 的 443，不能绑定 `0.0.0.0`；模板中的 `PUBLIC_IP` 和 `PROXY_SERVER_NAME` 必须替换成实际值。匹配 `proxy.serverName` 的连接转发到 sing-box，其余 TLS 连接进入管理页。TLS 在各自后端终止，App/Home 的地址、端口、UUID 和证书保持原有值。
+
+Relay 权威 JSON 使用以下监听配置（通过修订化保存/应用，不手改派生运行文件）：
+
+- `proxy.listen`: `127.0.0.1`，`proxy.port`: `443`。
+- `management.listen`: `127.0.0.2`，`management.port`: `443`，`management.https`: `true`。
+- `management.allowedHosts` 加入公网 IP；管理证书 SAN 必须包含该 IP，并配置受控的 `certificateFile` / `keyFile`。
+- 必须先设置管理员密码，再开放 HAProxy 公网入口。直接访问 `https://<公网IP>/`，无需端口号。自签名证书需要浏览器显式信任。
+
+此例仅支持同一地址族的两个不同明确回环 IP 共用端口；相同地址、通配监听、frps 或映射端口冲突仍被拒绝。配置保存/应用会保留这些监听值；管理页不要将 sing-box 监听改回通配地址，否则会与 HAProxy 冲突。更改 `proxy.serverName` 时还须同步修改 HAProxy SNI 规则。
+
+Debian 上安装 `haproxy` 后，将替换后的模板写入 `/etc/haproxy/haproxy.cfg`，用 `haproxy -c -f /etc/haproxy/haproxy.cfg` 校验。备份权威状态和当前 release，应用新的 Relay 修订，重启 manager，再执行 `systemctl enable haproxy` 和 `systemctl restart haproxy`（确保安装时已启动的进程加载新配置）。首次切换会短暂重启媒体隧道。验证公网页面、未认证 API 的 401、登录和 Home 隧道恢复后，删除主机防火墙中不再使用的 `9081/tcp` 放行规则。
+
+HAProxy 使用 TCP 透传，管理器看到的来源地址为回环，因此其登录限流会由所有远程访问者共享。保留管理员认证、HTTPS、Host/Origin 和 CSRF 检查。
+
 Home 默认允许局域网 IP 直连，仍需管理员密码或短期初始化凭据；只接受回环/家庭私有网段请求。实际到达本机接口的字面 IP 自动允许，其他主机名仍须列在 allowedHosts。Home 写请求的 Origin 必须与当前 Host 精确一致。Relay 非回环管理仍必须配置 HTTPS 和管理员密码。修改管理监听后，页面只保存，不自行重启管理服务；在本机重启管理服务后再应用组件配置，避免页面把旧监听状态误报成已生效。
 
 ## 使用流程
