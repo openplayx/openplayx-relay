@@ -1,16 +1,18 @@
-deployment.json
+/dist/
+/openplayx-relay
+/src/openplayx-relay
 generated/
-bin/
 secrets/
-__pycache__/
-*.pyc
+secrets-pki/
 
-# Private management state
+# Private management state (when a checkout is used as the config directory)
 /relay.json
 /secrets.json
 /admin.json
 /status.json
+/runtime.json
 /last-good.json
+/previous-good.json
 /revision.json
 /grants.json
 /bootstrap-token
@@ -18,4 +20,3 @@ __pycache__/
 /tls/
 /*.backup.json
 /*.damaged.*.json
-secrets-pki/
