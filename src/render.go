@@ -24,84 +24,6 @@ import (
 	singjson "github.com/sagernet/sing/common/json"
 )
 
-type serviceMapping struct {
-	ID         string
-	RemotePort int
-	LocalHost  string
-	LocalPort  int
-}
-
-// deployment is the validated, secret-resolved view the generators need.
-type deployment struct {
-	Role        string
-	ProxyHost   string
-	ProxyPort   int
-	ServerName  string
-	HomeUUID    string
-	AppUUID     string
-	ProxyCA     string
-	Listen      string
-	ProxyCert   string
-	ProxyKey    string
-	FRPToken    string
-	ControlPort int
-	LogLevel    string
-	Services    []serviceMapping
-	FRPCert     string
-	FRPKey      string
-	SocksPort   int
-	FRPServer   string
-	FRPCA       string
-	Retry       int
-}
-
-func (s *Store) materialize(cfg obj, values obj) (*deployment, error) {
-	if _, err := s.validate(cfg, values); err != nil {
-		return nil, err
-	}
-	p, f := cfg["proxy"].(obj), cfg["frp"].(obj)
-	proxyPort, _ := port(p["port"])
-	controlPort, _ := port(f["controlPort"])
-	d := &deployment{
-		Role: s.role, ProxyHost: p["host"].(string), ProxyPort: proxyPort, ServerName: p["serverName"].(string),
-		HomeUUID: values[p["homeCredentialRef"].(string)].(string), FRPToken: values[f["credentialRef"].(string)].(string),
-		ControlPort: controlPort, LogLevel: cfg["log"].(obj)["level"].(string),
-	}
-	for _, value := range cfg["services"].([]any) {
-		item := value.(obj)
-		remote, _ := port(item["relayPort"])
-		mapping := serviceMapping{ID: item["serviceId"].(string), RemotePort: remote}
-		if s.role == roleHome {
-			mapping.LocalHost = item["targetHost"].(string)
-			mapping.LocalPort, _ = port(item["targetPort"])
-		}
-		d.Services = append(d.Services, mapping)
-	}
-	var err error
-	if s.role == roleRelay {
-		d.AppUUID = values[p["appCredentialRef"].(string)].(string)
-		d.Listen = p["listen"].(string)
-		for _, item := range []struct {
-			target *string
-			ref    any
-		}{{&d.ProxyCert, p["certificateFile"]}, {&d.ProxyKey, p["keyFile"]}, {&d.FRPCert, f["certificateFile"]}, {&d.FRPKey, f["keyFile"]}} {
-			if *item.target, err = s.tlsPath(item.ref); err != nil {
-				return nil, err
-			}
-		}
-	} else {
-		d.ProxyCA = p["caCertificate"].(string)
-		d.SocksPort, _ = port(cfg["singBox"].(obj)["socksPort"])
-		d.FRPServer = f["serverName"].(string)
-		if d.FRPCA, err = s.tlsPath(f["caFile"]); err != nil {
-			return nil, err
-		}
-		retry, _ := intValue(cfg["reconnect"].(obj)["intervalSeconds"])
-		d.Retry = int(retry)
-	}
-	return d, nil
-}
-
 // Plan holds derived sing-box and frp configuration that passed the same
 // checks as `sing-box check` and `frps/frpc verify`.
 type Plan struct {
@@ -118,18 +40,28 @@ type Plan struct {
 	secrets      obj
 }
 
+// homeRetry is the delay between Home sing-box start attempts.
+const homeRetry = 5 * time.Second
+
 func (s *Store) plan(cfg obj, values obj) (*Plan, error) {
-	d, err := s.materialize(cfg, values)
-	if err != nil {
+	if _, err := s.validate(cfg, values); err != nil {
 		return nil, err
 	}
-	sing, frp, err := render(d)
-	if err != nil {
-		return nil, err
-	}
-	plan := &Plan{Role: s.role, Revision: cfg["revision"], SocksPort: d.SocksPort, Retry: time.Duration(max(d.Retry, 1)) * time.Second, LogLevel: d.LogLevel, secrets: values}
+	var sing, frp obj
+	var err error
+	plan := &Plan{Role: s.role, Revision: cfg["revision"], Retry: homeRetry, LogLevel: stringValue(section(cfg, "log")["level"]), secrets: values}
 	if s.role == roleRelay {
-		plan.ProxyAddress, plan.ServerName = net.JoinHostPort(d.Listen, strconv.Itoa(d.ProxyPort)), d.ServerName
+		sing, frp, err = s.renderRelay(cfg, values)
+		inbound := section(cfg, "singBox", "inbound")
+		listenPort, _ := port(inbound["listen_port"])
+		plan.ProxyAddress = net.JoinHostPort(stringValue(inbound["listen"]), strconv.Itoa(listenPort))
+		plan.ServerName = stringValue(section(inbound, "tls")["server_name"])
+	} else {
+		sing, frp, err = s.renderHome(cfg, values)
+		plan.SocksPort, _ = port(section(cfg, "singBox", "inbound")["listen_port"])
+	}
+	if err != nil {
+		return nil, err
 	}
 	if plan.SingBox, err = json.Marshal(sing); err != nil {
 		return nil, err
@@ -143,115 +75,132 @@ func (s *Store) plan(cfg obj, values obj) (*Plan, error) {
 	return plan, nil
 }
 
-func checkMappings(d *deployment) error {
-	if len(d.Services) < 1 || len(d.Services) > 32 {
-		return errors.New("configure 1..32 explicitly authorized services")
+func ints(value any) []any {
+	result := []any{}
+	items, _ := value.([]any)
+	for _, item := range items {
+		number, _ := intValue(item)
+		result = append(result, number)
 	}
-	names, ports := map[string]bool{}, map[int]bool{}
-	for _, item := range d.Services {
-		valid := item.ID != ""
-		for _, character := range item.ID {
-			valid = valid && (isAlnum(character) || character == '-' || character == '_')
-		}
-		if !valid || names[item.ID] || ports[item.RemotePort] || item.RemotePort < 1 || item.RemotePort > 65535 {
-			return errors.New("service ids and mapping ports must be unique")
-		}
-		names[item.ID], ports[item.RemotePort] = true, true
-	}
-	if ports[d.ControlPort] {
-		return errors.New("control port collides with a media mapping")
-	}
-	if len(d.FRPToken) < 32 {
-		return errors.New("frpToken must have at least 32 characters")
-	}
-	return nil
+	return result
 }
 
-// render produces the derived sing-box options and frp configuration (frp's
-// JSON form of the same fields as the TOML file used previously).
-func render(d *deployment) (obj, obj, error) {
-	if err := checkMappings(d); err != nil {
+func frpAuth(values obj, ref any) obj {
+	return obj{"method": "token", "token": values[stringValue(ref)], "additionalScopes": []any{"HeartBeats", "NewWorkConns"}}
+}
+
+// renderRelay produces the sing-box and frps runtime configuration. Users
+// keep their names; route rules only reach loopback, everything else is
+// rejected. frps binds loopback only.
+func (s *Store) renderRelay(cfg, values obj) (obj, obj, error) {
+	inbound := section(cfg, "singBox", "inbound")
+	tls := section(inbound, "tls")
+	certificate, err := s.tlsPath(tls["certificate_path"])
+	if err != nil {
 		return nil, nil, err
 	}
-	logLevel := d.LogLevel
-	mappingPorts := []any{}
-	for _, item := range d.Services {
-		mappingPorts = append(mappingPorts, item.RemotePort)
+	key, err := s.tlsPath(tls["key_path"])
+	if err != nil {
+		return nil, nil, err
 	}
-	auth := obj{"method": "token", "token": d.FRPToken, "additionalScopes": []any{"HeartBeats", "NewWorkConns"}}
-	frpLog := obj{"to": "console", "level": logLevel}
-	if d.Role == roleRelay {
-		if !parseUUID(d.AppUUID) || !parseUUID(d.HomeUUID) {
-			return nil, nil, errors.New("invalid identity")
-		}
-		if d.AppUUID == d.HomeUUID {
-			return nil, nil, errors.New("home and app identities must be distinct")
-		}
-		if d.ProxyPort == d.ControlPort || containsAny(mappingPorts, d.ProxyPort) {
-			return nil, nil, errors.New("proxy port collides with frp ports")
-		}
-		// Each deployment is one household. Independent households use separate
-		// instances; a shared frp token is not a multi-tenant authorization system.
-		rules := []any{
-			obj{"auth_user": []any{"home"}, "ip_cidr": []any{"127.0.0.1/32"}, "port": []any{d.ControlPort}, "action": "route", "outbound": "direct"},
-			obj{"auth_user": []any{"app"}, "ip_cidr": []any{"127.0.0.1/32"}, "port": mappingPorts, "action": "route", "outbound": "direct"},
-			obj{"action": "reject"},
-		}
-		sing := obj{
-			"log": obj{"level": logLevel, "timestamp": true},
-			"inbounds": []any{obj{"type": "vless", "tag": "proxy", "listen": d.Listen, "listen_port": d.ProxyPort,
-				"users": []any{obj{"name": "app", "uuid": d.AppUUID}, obj{"name": "home", "uuid": d.HomeUUID}},
-				"tls":   obj{"enabled": true, "certificate_path": d.ProxyCert, "key_path": d.ProxyKey}}},
-			"outbounds": []any{obj{"type": "direct", "tag": "direct"}},
-			"route":     obj{"rules": rules},
-		}
-		allow := []any{}
-		for _, number := range mappingPorts {
-			allow = append(allow, obj{"single": number})
-		}
-		frp := obj{"bindAddr": "127.0.0.1", "bindPort": d.ControlPort, "proxyBindAddr": "127.0.0.1", "auth": auth,
-			"transport":  obj{"tls": obj{"force": true, "certFile": d.FRPCert, "keyFile": d.FRPKey}},
-			"allowPorts": allow, "log": frpLog}
-		return sing, frp, nil
+	users := []any{}
+	for _, item := range inbound["users"].([]any) {
+		user := item.(obj)
+		users = append(users, obj{"name": user["name"], "uuid": values[stringValue(user["uuid"])]})
 	}
-	if !parseUUID(d.HomeUUID) {
-		return nil, nil, errors.New("invalid identity")
+	listenPort, _ := port(inbound["listen_port"])
+	rules := []any{}
+	for _, item := range section(cfg, "singBox", "route")["rules"].([]any) {
+		rule := item.(obj)
+		rendered := obj{"auth_user": rule["auth_user"], "ip_cidr": []any{"127.0.0.1/32"}, "action": "route", "outbound": "direct"}
+		if value, ok := rule["port"]; ok {
+			rendered["port"] = ints(value)
+		}
+		if value, ok := rule["port_range"]; ok {
+			rendered["port_range"] = value
+		}
+		rules = append(rules, rendered)
 	}
-	if d.ServerName == "" || d.ProxyHost == "" {
-		return nil, nil, errors.New("proxy host and TLS serverName are required")
-	}
-	tls := obj{"enabled": true, "server_name": d.ServerName}
-	if d.ProxyCA != "" {
-		tls["certificate"] = d.ProxyCA
-	}
+	rules = append(rules, obj{"action": "reject"})
+	logLevel := stringValue(section(cfg, "log")["level"])
 	sing := obj{
-		"log":       obj{"level": logLevel, "timestamp": true},
-		"inbounds":  []any{obj{"type": "socks", "tag": "socks", "listen": "127.0.0.1", "listen_port": d.SocksPort}},
-		"outbounds": []any{obj{"type": "vless", "tag": "relay", "server": d.ProxyHost, "server_port": d.ProxyPort, "uuid": d.HomeUUID, "tls": tls}},
-		"route":     obj{"final": "relay"},
+		"log": obj{"level": logLevel, "timestamp": true},
+		"inbounds": []any{obj{"type": "vless", "tag": "proxy", "listen": inbound["listen"], "listen_port": listenPort, "users": users,
+			"tls": obj{"enabled": true, "server_name": tls["server_name"], "certificate_path": certificate, "key_path": key}}},
+		"outbounds": []any{obj{"type": "direct", "tag": "direct"}},
+		"route":     obj{"rules": rules},
 	}
-	proxies := []any{}
-	for _, item := range d.Services {
-		if item.LocalHost == "" || strings.ContainsAny(item.LocalHost, "/\\\n") {
-			return nil, nil, errors.New("invalid localHost")
+	frps := cfg["frps"].(obj)
+	certFile, err := s.tlsPath(section(frps, "transport", "tls")["certFile"])
+	if err != nil {
+		return nil, nil, err
+	}
+	keyFile, err := s.tlsPath(section(frps, "transport", "tls")["keyFile"])
+	if err != nil {
+		return nil, nil, err
+	}
+	allow := []any{}
+	ranges, _ := allowPorts(frps["allowPorts"])
+	for _, item := range ranges {
+		if item.start == item.end {
+			allow = append(allow, obj{"single": item.start})
+		} else {
+			allow = append(allow, obj{"start": item.start, "end": item.end})
 		}
-		proxies = append(proxies, obj{"name": item.ID, "type": "tcp", "localIP": item.LocalHost, "localPort": item.LocalPort,
-			"remotePort": item.RemotePort, "healthCheck": obj{"type": "tcp", "intervalSeconds": 10}})
 	}
-	frp := obj{"serverAddr": "127.0.0.1", "serverPort": d.ControlPort, "loginFailExit": false, "auth": auth,
-		"transport": obj{"protocol": "tcp", "proxyURL": fmt.Sprintf("socks5://127.0.0.1:%d", d.SocksPort),
-			"tls": obj{"enable": true, "serverName": d.FRPServer, "trustedCaFile": d.FRPCA}},
-		"log": frpLog, "proxies": proxies}
+	bindPort, _ := port(frps["bindPort"])
+	frp := obj{"bindAddr": "127.0.0.1", "bindPort": bindPort, "proxyBindAddr": "127.0.0.1", "auth": frpAuth(values, section(frps, "auth")["token"]),
+		"transport":  obj{"tls": obj{"force": true, "certFile": certFile, "keyFile": keyFile}},
+		"allowPorts": allow, "log": obj{"to": "console", "level": logLevel}}
 	return sing, frp, nil
 }
 
-func containsAny(values []any, value int) bool {
-	for _, item := range values {
-		if item == value {
-			return true
-		}
+// renderHome produces the sing-box (SOCKS -> VLESS) and frpc configuration.
+// frpc only reaches frps through the SOCKS inbound; there is no direct mode.
+func (s *Store) renderHome(cfg, values obj) (obj, obj, error) {
+	inbound := section(cfg, "singBox", "inbound")
+	outbound := section(cfg, "singBox", "outbound")
+	socksPort, _ := port(inbound["listen_port"])
+	serverPort, _ := port(outbound["server_port"])
+	tls := obj{"enabled": true, "server_name": section(outbound, "tls")["server_name"]}
+	if ca := stringValue(section(outbound, "tls")["certificate"]); ca != "" {
+		tls["certificate"] = ca
 	}
-	return false
+	logLevel := stringValue(section(cfg, "log")["level"])
+	sing := obj{
+		"log":      obj{"level": logLevel, "timestamp": true},
+		"inbounds": []any{obj{"type": "socks", "tag": "socks", "listen": "127.0.0.1", "listen_port": socksPort}},
+		"outbounds": []any{obj{"type": "vless", "tag": "relay", "server": outbound["server"], "server_port": serverPort,
+			"uuid": values[stringValue(outbound["uuid"])], "tls": tls}},
+		"route": obj{"final": "relay"},
+	}
+	frpc := cfg["frpc"].(obj)
+	frpTLS := section(frpc, "transport", "tls")
+	trusted, err := s.tlsPath(frpTLS["trustedCaFile"])
+	if err != nil {
+		return nil, nil, err
+	}
+	proxies := []any{}
+	for _, item := range frpc["proxies"].([]any) {
+		proxy := item.(obj)
+		localIP := stringValue(proxy["localIP"])
+		if localIP == "" || strings.ContainsAny(localIP, "/\\\n") {
+			return nil, nil, errors.New("invalid localIP")
+		}
+		localPort, _ := port(proxy["localPort"])
+		remotePort, _ := port(proxy["remotePort"])
+		proxies = append(proxies, obj{"name": proxy["name"], "type": "tcp", "localIP": localIP, "localPort": localPort,
+			"remotePort": remotePort, "healthCheck": obj{"type": "tcp", "intervalSeconds": 10}})
+	}
+	serverPortFRP, _ := port(frpc["serverPort"])
+	frp := obj{"serverAddr": "127.0.0.1", "serverPort": serverPortFRP, "loginFailExit": false, "auth": frpAuth(values, section(frpc, "auth")["token"]),
+		"transport": obj{"protocol": "tcp", "proxyURL": fmt.Sprintf("socks5://127.0.0.1:%d", socksPort),
+			"tls": obj{"enable": true, "serverName": frpTLS["serverName"], "trustedCaFile": trusted}},
+		"log": obj{"to": "console", "level": logLevel}, "proxies": proxies}
+	if user := stringValue(frpc["user"]); user != "" {
+		frp["user"] = user
+	}
+	return sing, frp, nil
 }
 
 func singBoxOptions(data []byte) (context.Context, option.Options, error) {

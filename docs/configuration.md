@@ -4,7 +4,7 @@
 
 ## 文件与职责
 
-- `relay.json` / `home.json`：本端唯一可编辑连接配置，含 `schemaVersion: 1` 和单调递增的 `revision`。
+- `relay.json` / `home.json`：本端唯一可编辑连接配置，含 `schemaVersion: 2` 和单调递增的 `revision`，结构见下文。
 - `secrets.json`：UUID、frp token 的实际值，普通配置只有 `secret:...` 引用。读取、状态和脱敏导出 API 不返回实际值。
 - `tls/`：受控证书与私钥资产；配置只保存相对受控目录的引用。Web 导入最多 128 KiB 的 PEM，服务端生成文件名，不接受浏览器提供的路径。运行时直接读取这里的文件。
 - `admin.json`：独立管理员密码的 scrypt 校验信息（与 Python 版本格式相同，迁移后密码继续有效）；管理员身份与 App、frpc 身份无关。
@@ -13,23 +13,80 @@
 - `last-good.json`：最近一次成功应用的修订，服务启动时据此启动组件；`previous-good.json`：再上一份成功修订，其机密引用在回收时保留。
 - `status.json`：实际生效修订与失败状态；`runtime.json`：运行中的服务发布的组件状态，供 CLI `status`/`apply` 读取。
 - `revision.json`：已发放修订计数，保证显式损坏恢复也不复用旧修订。
-- `grants.json`（仅 Home）：从可信 Relay 配对目录导入的本机授权，Web 不可编辑。Home 只能选择该家庭、Relay 和已分配服务/映射端口。
 
 持久目录默认 `/var/lib/openplayx-relay/` 或 `/var/lib/openplayx-home/`，目录 0700、配置/机密/资产 0600，归服务账户所有。以 root 执行修改配置的 CLI 命令后，程序会把目录内文件的属主恢复为该目录的属主。
 
-## 从旧部署迁移
+## 配置结构（沿用 sing-box / frp 字段）
 
-已有 Python 版本部署：直接 `sudo ./openplayx-relay install`，沿用原持久目录，见 README。
+配置分两层：**网络层用 sing-box，注册层用 frp**。字段名与上游一致，但只开放一个受控子集：类型、tag、回环监听、TLS 强制等固定值由后端校验，凭据字段（`uuid`、`token`）只保存 `secret:...` 引用。
 
-只有旧的扁平 `deployment.json` 时，导入到一个新的私有目录（若已有权威文件则拒绝覆盖）：
+Relay `relay.json`：
 
-```bash
-./openplayx-relay import-legacy --config-dir /path/to/private-state --file /path/to/old-deployment.json
+```json
+{
+  "schemaVersion": 2, "revision": 6,
+  "singBox": {
+    "inbound": {
+      "type": "vless", "tag": "proxy", "listen": "127.0.0.1", "listen_port": 443,
+      "users": [ { "name": "home", "uuid": "secret:..." }, { "name": "app", "uuid": "secret:..." } ],
+      "tls": { "enabled": true, "server_name": "relay.example.com", "certificate_path": "tls/proxy.crt", "key_path": "tls/proxy.key" }
+    },
+    "route": { "rules": [
+      { "auth_user": ["home"], "port": [7000] },
+      { "auth_user": ["app"], "port_range": ["18000:18999"] }
+    ] }
+  },
+  "frps": {
+    "bindPort": 7000, "auth": { "token": "secret:..." },
+    "transport": { "tls": { "certFile": "tls/frps.crt", "keyFile": "tls/frps.key" } },
+    "allowPorts": [ { "start": 18000, "end": 18999 } ]
+  },
+  "log": { "level": "warn" },
+  "management": { "...": "..." }
+}
 ```
 
-这一步生成角色 JSON、机密引用和 TLS 副本；不会启动组件或改变线上配置。迁移后停止编辑旧 deployment.json。
+- `inbound.users`：每台 Home、每个 App 设备一个 user；删除 user 即吊销该身份，UUID 不可重复。
+- `route.rules`：只允许 `auth_user`、`port`、`port_range`。生成运行配置时每条规则限定目的地址 `127.0.0.1/32` 并路由到 direct，末尾追加 reject；端口只能是 `frps.bindPort` 或 `frps.allowPorts` 内的端口。修改 `bindPort` 时同时修改放行它的规则。
+- `frps`：固定只监听回环并强制 TLS；`allowPorts` 为 frp 原生格式（`{"single": n}` 或 `{"start": a, "end": b}`），限定 Home 可以注册的 `remotePort`。Relay 不需要预先知道服务列表。
 
-`pair` 直接输出分离的 `relay/`、`home/` 持久目录和 `app-jellyfin.json`。家庭端只接收 `home/`，它不包含 App UUID 或 Relay 私钥。App 配对文件包含实际客户端机密，应通过可信渠道传递，不能作为脱敏配置公开。
+Home `home.json`：
+
+```json
+{
+  "schemaVersion": 2, "revision": 5,
+  "singBox": {
+    "inbound": { "type": "socks", "tag": "socks", "listen": "127.0.0.1", "listen_port": 1080 },
+    "outbound": {
+      "type": "vless", "tag": "relay", "server": "relay.example.com", "server_port": 443, "uuid": "secret:...",
+      "tls": { "enabled": true, "server_name": "relay.example.com", "certificate": "（可选 CA PEM）" }
+    }
+  },
+  "frpc": {
+    "user": "home", "serverAddr": "127.0.0.1", "serverPort": 7000, "auth": { "token": "secret:..." },
+    "transport": { "tls": { "serverName": "openplayx-frps", "trustedCaFile": "tls/frps-ca.crt" } },
+    "proxies": [
+      { "name": "jellyfin", "type": "tcp", "localIP": "192.168.1.10", "localPort": 8096, "remotePort": 18096 }
+    ]
+  },
+  "log": { "level": "warn" },
+  "management": { "...": "..." }
+}
+```
+
+- `singBox.outbound` 的 `uuid` 是 Relay 上某个 user 的 UUID；`inbound` 仅供 frpc 经 `transport.proxyURL` 使用。
+- `frpc.serverAddr` 固定 `127.0.0.1`：frpc 经 SOCKS → VLESS 到达 Relay 回环上的 frps，没有直连模式。
+- `frpc.proxies` 就是服务注册：当前只支持 `type: "tcp"`；`remotePort` 必须落在 Relay `frps.allowPorts` 内，否则 frps 拒绝。设置 `user` 后 frps 上的 proxy 名称为 `user.name`。
+
+App 使用的文件（`pair` 生成 `app.json`）只有两部分：一个 sing-box `outbound`（含该 App user 的 UUID），以及它可以使用的 frpc proxy 子集 `proxies: [{ "name", "remotePort" }]`。
+
+Web 表单与 API 的机密更新键：Relay 为 `uuid:<user name>` 与 `token`，Home 为 `uuid` 与 `token`；留空表示保持，空字符串表示清除。
+
+## 初始化
+
+`schemaVersion: 1`（含 `homeId`、`services`、`grants.json` 的旧格式）不再读取，也不提供自动导入；旧部署需要按上面的结构重写配置并保留原 `secret:` 引用。
+
+新部署用 Relay 的 `openplayx-relay pair` 一次生成分离的 `relay/`、`home/` 持久目录和 `app.json`。家庭端只接收 `home/`，它不包含 App UUID 或 Relay 私钥。`app.json` 包含实际客户端机密，应通过可信渠道传递，不能作为脱敏配置公开。
 
 ## 运行与安装
 
@@ -64,14 +121,14 @@ ssh -L 9081:127.0.0.1:9081 user@relay.example.com
 
 Relay 可以自己监听公网 443，同时服务 App/Home 的代理连接和 Web 管理页，不需要 HAProxy、Caddy 等外部程序。程序只读取 TLS ClientHello 中的 SNI，不解密内容：
 
-- SNI 等于**当前已应用修订**的 `proxy.serverName`：字节原样转发到回环上的 sing-box（`proxy.listen:proxy.port`），TLS 由 sing-box 终止，App/Home 的地址、端口、UUID 和证书保持原值。sing-box 未运行时连接被关闭。
+- SNI 等于**当前已应用修订**的 `singBox.inbound.tls.server_name`：字节原样转发到回环上的 sing-box（`singBox.inbound.listen:listen_port`），TLS 由 sing-box 终止，App/Home outbound 的地址、端口、UUID 和证书保持原值。sing-box 未运行时连接被关闭。
 - 其他 TLS 连接（例如浏览器直接访问 `https://<公网IP>/`）：在进程内交给 HTTPS 管理页，管理页看到的是真实来源地址，登录限流按来源分别计算。
 - 非 TLS 或 5 秒内未完成 ClientHello 的连接直接关闭；未完成握手的连接数有上限。
 
 在 `relay.json` 的 `management` 中增加可选的 `frontend`（管理页“公网 TLS 入口 IP/端口”字段）：
 
 ```json
-"proxy": { "listen": "127.0.0.1", "port": 443, "serverName": "relay.example.com", "...": "..." },
+"singBox": { "inbound": { "listen": "127.0.0.1", "listen_port": 443, "tls": { "server_name": "relay.example.com", "...": "..." }, "...": "..." }, "...": "..." },
 "management": {
   "listen": "127.0.0.1", "port": 9081, "https": true,
   "certificateFile": "tls/<管理证书>.crt", "keyFile": "tls/<管理私钥>.key",
@@ -82,11 +139,11 @@ Relay 可以自己监听公网 443，同时服务 App/Home 的代理连接和 We
 
 约束（后端校验）：
 
-- `frontend.listen` 是本机实际公网 IP（不能是回环；`0.0.0.0` 会与回环上的 sing-box 冲突而被拒绝）。`frontend.port` 必须等于 `proxy.port`，因为配对文件和 Home 授权里的端口就是它。
-- `proxy.listen` 必须是回环地址；管理页必须开启 HTTPS 并配置受控证书；必须先设置管理员密码。`allowedHosts` 加入公网 IP 或域名，管理证书 SAN 需包含它，自签名证书需要浏览器显式信任。
-- 不能与代理、管理页、frps 控制或映射端口的监听冲突。管理页本身仍在回环端口（例如 9081）上，可以继续用 SSH 转发访问。
+- `frontend.listen` 是本机实际公网 IP（不能是回环；`0.0.0.0` 会与回环上的 sing-box 冲突而被拒绝）。`frontend.port` 必须等于 `singBox.inbound.listen_port`，因为 Home 与 App outbound 的 `server_port` 就是它。
+- `singBox.inbound.listen` 必须是回环地址；管理页必须开启 HTTPS 并配置受控证书；必须先设置管理员密码。`allowedHosts` 加入公网 IP 或域名，管理证书 SAN 需包含它，自签名证书需要浏览器显式信任。
+- 不能与 inbound、管理页、frps `bindPort` 或 `allowPorts` 的监听冲突。管理页本身仍在回环端口（例如 9081）上，可以继续用 SSH 转发访问。
 
-`frontend` 属于管理入口：保存后执行 `systemctl restart openplayx-relay` 才生效（组件按已应用修订一并重启，会短暂中断播放）。更改 `proxy.serverName` 后，分流按新应用的修订自动生效。验证公网页面、未认证 API 的 401、登录和 Home 隧道恢复后，删除主机防火墙中不再需要的 `9081/tcp` 放行规则。
+`frontend` 属于管理入口：保存后执行 `systemctl restart openplayx-relay` 才生效（组件按已应用修订一并重启，会短暂中断播放）。更改 `singBox.inbound.tls.server_name` 后，分流按新应用的修订自动生效。验证公网页面、未认证 API 的 401、登录和 Home 隧道恢复后，删除主机防火墙中不再需要的 `9081/tcp` 放行规则。
 
 此前使用 HAProxy 的部署（sing-box `127.0.0.1:443`、管理页 `127.0.0.2:443`）仍可继续运行。改用内置分流时：保存带 `frontend` 的修订，`systemctl disable --now haproxy`，再重启 `openplayx-relay`（内置入口要绑定 HAProxy 原来占用的公网 443）。
 
@@ -116,7 +173,7 @@ CLI `apply` 对已安装的 systemd 服务执行同样的流程：写入 `last-g
 - `GET /api/config`、`/api/status`、`/api/export`；`POST /api/validate`、`/api/test`、`/api/save`、`/api/apply`、`/api/restore`；显式损坏恢复使用 `/api/recovery` 与 `/api/recover`。所有配置/状态接口均需认证。
 - 管理监听变化需要本机重启服务；管理器没有停止/重启自身或系统其他服务的 Web API。
 
-单家庭、多服务的授权范围沿用基础部署，不扩展为多租户。当前生成器支持固定版本 VLESS/TLS；新增代理协议需要增加后端 schema、生成器和真实验证，不能在表单中伪装为已经支持。
+frp token 由所有 Home 共享，不提供跨家庭的映射归属控制；多家庭应使用独立实例。当前生成器支持固定版本 VLESS/TLS；新增代理协议需要增加后端 schema、生成器和真实验证，不能在表单中伪装为已经支持。
 
 ## 验证
 

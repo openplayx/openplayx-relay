@@ -46,11 +46,10 @@ Commands:
   status           print saved/applied revision and component state
   check            validate the saved configuration with the embedded upstream checks
   render           write derived sing-box/%[5]s configuration for inspection
-  import-legacy    initialise from an old flat deployment.json
   renew-bootstrap  issue a new 15 minute local bootstrap credential
 `, binaryName(), version, singBoxVersion, frpVersion, map[string]string{roleRelay: "frps", roleHome: "frpc"}[role])
 	if role == roleRelay {
-		fmt.Fprintln(os.Stderr, "  pair             create relay/, home/ and App pairing bundles")
+		fmt.Fprintln(os.Stderr, "  pair             create relay/, home/ and app.json for a new deployment")
 	} else {
 		fmt.Fprintln(os.Stderr, "  enable-lan       save LAN management access for an existing configuration")
 	}
@@ -82,8 +81,6 @@ func main() {
 		err = cmdStatus(args)
 	case "check", "render":
 		err = cmdCheck(command, args)
-	case "import-legacy":
-		err = cmdImportLegacy(args)
 	case "renew-bootstrap":
 		err = cmdRenewBootstrap(args)
 	case "enable-lan":
@@ -321,30 +318,6 @@ func cmdCheck(command string, args []string) error {
 		return nil
 	}
 	fmt.Println("Revision", cfg["revision"], "passed sing-box and", store.frpName(), "checks.")
-	return nil
-}
-
-func cmdImportLegacy(args []string) error {
-	flags, directory := newFlags("import-legacy")
-	file := flags.String("file", "", "old deployment.json (required)")
-	homeID := flags.String("home-id", "", "stable home ID (default: from the file, or home-main)")
-	_ = flags.Parse(args)
-	if *file == "" {
-		return errors.New("--file is required")
-	}
-	store, done, err := openStore(*directory)
-	if err != nil {
-		return err
-	}
-	defer done()
-	raw, err := readObj(*file)
-	if err != nil {
-		return err
-	}
-	if _, err = store.importLegacy(raw, *homeID); err != nil {
-		return err
-	}
-	fmt.Println("Imported into", store.path, "; not applied.")
 	return nil
 }
 

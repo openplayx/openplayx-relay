@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
-	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -89,96 +88,6 @@ func (s *Store) lock() (func(), error) {
 	}, nil
 }
 
-func (s *Store) blank() obj {
-	management := obj{"listen": "0.0.0.0", "port": 9080, "https": false, "allowedHosts": []any{"localhost", "127.0.0.1"}}
-	if s.role == roleRelay {
-		management["listen"], management["port"] = "127.0.0.1", 9081
-	}
-	cfg := obj{
-		"schemaVersion": 1, "revision": 0, "homeId": "home-main",
-		"proxy":      obj{"host": "relay.example.com", "port": 443, "serverName": "relay.example.com", "protocol": "vless-tls", "homeCredentialRef": ""},
-		"frp":        obj{"controlPort": 7000, "credentialRef": "", "serverName": "openplayx-frps"},
-		"services":   []any{},
-		"log":        obj{"level": "warn"},
-		"management": management,
-	}
-	proxy, frp := cfg["proxy"].(obj), cfg["frp"].(obj)
-	if s.role == roleRelay {
-		proxy["appCredentialRef"], proxy["listen"], proxy["certificateFile"], proxy["keyFile"] = "", "0.0.0.0", "", ""
-		frp["certificateFile"], frp["keyFile"] = "", ""
-	} else {
-		proxy["caCertificate"] = ""
-		cfg["singBox"] = obj{"socksListen": "127.0.0.1", "socksPort": 1080}
-		frp["caFile"] = ""
-		cfg["reconnect"] = obj{"intervalSeconds": 5}
-	}
-	return cloneObj(cfg)
-}
-
-func (s *Store) serviceFields() []string {
-	if s.role == roleHome {
-		return []string{"serviceId", "relayPort", "targetHost", "targetPort"}
-	}
-	return []string{"serviceId", "relayPort"}
-}
-
-var managementFields = []string{"listen", "port", "https", "allowedHosts", "certificateFile", "keyFile", "frontend"}
-var managementRequired = []string{"listen", "port", "https", "allowedHosts"}
-
-func (s *Store) load() (obj, error) {
-	if !exists(s.path) {
-		return s.blank(), nil
-	}
-	value, err := readJSON(s.path)
-	if err != nil {
-		return nil, err
-	}
-	cfg, ok := value.(obj)
-	if version, isInt := intValue(cfg["schemaVersion"]); !ok || !isInt || version != 1 {
-		return nil, cfgErr("unknownSchema", "配置版本不支持，禁止覆盖原文件。", 409)
-	}
-	template := s.blank()
-	if err = checkKeys(cfg, keysOf(template), keysOf(template)); err != nil {
-		return nil, err
-	}
-	sections := []string{"proxy", "frp", "log"}
-	if s.role == roleHome {
-		sections = append(sections, "singBox", "reconnect")
-	}
-	for _, section := range sections {
-		fields := keysOf(template[section].(obj))
-		if err = checkKeys(cfg[section], fields, fields); err != nil {
-			return nil, err
-		}
-	}
-	if err = checkKeys(cfg["management"], managementFields, managementRequired); err != nil {
-		return nil, err
-	}
-	services, ok := cfg["services"].([]any)
-	if !ok {
-		return nil, cfgErr("invalidFields", "服务配置无效，原文件已保留。", 409)
-	}
-	for _, service := range services {
-		if err = checkKeys(service, s.serviceFields(), s.serviceFields()); err != nil {
-			return nil, err
-		}
-	}
-	for _, owner := range []obj{cfg["proxy"].(obj), cfg["frp"].(obj)} {
-		for key, ref := range owner {
-			if strings.HasSuffix(key, "CredentialRef") || key == "credentialRef" {
-				value, isString := ref.(string)
-				if !isString || (value != "" && !strings.HasPrefix(value, "secret:")) {
-					return nil, cfgErr("plainSecretDenied", "普通配置只能保存机密引用，原文件已保留。", 409)
-				}
-			}
-		}
-	}
-	if ca, _ := cfg["proxy"].(obj)["caCertificate"].(string); strings.Contains(ca, "PRIVATE KEY") {
-		return nil, cfgErr("plainSecretDenied", "CA 字段不能包含私钥，原文件已保留。", 409)
-	}
-	return cfg, nil
-}
-
 func (s *Store) secrets() (obj, error) {
 	if !exists(s.file("secrets.json")) {
 		return obj{}, nil
@@ -215,222 +124,6 @@ func (s *Store) tlsPath(value any) (string, error) {
 	return path, nil
 }
 
-func (s *Store) readGrants() (obj, error) { return readObj(s.file("grants.json")) }
-
-type credentialRef struct {
-	owner obj
-	key   string
-	kind  string
-}
-
-func (s *Store) validate(value any, values obj) (obj, error) {
-	template := s.blank()
-	if err := checkKeys(value, keysOf(template), keysOf(template)); err != nil {
-		return nil, err
-	}
-	cfg := value.(obj)
-	version, okVersion := intValue(cfg["schemaVersion"])
-	revision, okRevision := intValue(cfg["revision"])
-	if !okVersion || version != 1 || !okRevision || revision < 0 {
-		return nil, cfgErr("unknownSchema", "不支持的 schemaVersion 或 revision。")
-	}
-	if _, err := identifier(cfg["homeId"]); err != nil {
-		return nil, err
-	}
-	proxyFields := keysOf(template["proxy"].(obj))
-	if err := checkKeys(cfg["proxy"], proxyFields, proxyFields); err != nil {
-		return nil, err
-	}
-	p := cfg["proxy"].(obj)
-	if _, err := host(p["host"]); err != nil {
-		return nil, err
-	}
-	proxyPort, err := port(p["port"])
-	if err != nil {
-		return nil, err
-	}
-	if _, err = host(p["serverName"]); err != nil {
-		return nil, err
-	}
-	if p["protocol"] != "vless-tls" {
-		return nil, cfgErr("invalidProtocol", "当前管理器使用 VLESS + TLS 配置模板。")
-	}
-	frpFields := keysOf(template["frp"].(obj))
-	if err = checkKeys(cfg["frp"], frpFields, frpFields); err != nil {
-		return nil, err
-	}
-	f := cfg["frp"].(obj)
-	controlPort, err := port(f["controlPort"])
-	if err != nil {
-		return nil, err
-	}
-	if _, err = host(f["serverName"]); err != nil {
-		return nil, err
-	}
-	if proxyPort == controlPort {
-		return nil, cfgErr("portConflict", "代理和 frps 控制端口冲突。")
-	}
-	refs := []credentialRef{{p, "homeCredentialRef", "uuid"}, {f, "credentialRef", "token"}}
-	if s.role == roleRelay {
-		if _, err = host(p["listen"]); err != nil {
-			return nil, err
-		}
-		refs = append(refs, credentialRef{p, "appCredentialRef", "uuid"})
-		for _, item := range []struct {
-			owner obj
-			key   string
-		}{{p, "certificateFile"}, {p, "keyFile"}, {f, "certificateFile"}, {f, "keyFile"}} {
-			if _, err = s.tlsPath(item.owner[item.key]); err != nil {
-				return nil, err
-			}
-		}
-	} else {
-		if err = checkKeys(cfg["singBox"], []string{"socksListen", "socksPort"}, []string{"socksListen", "socksPort"}); err != nil {
-			return nil, err
-		}
-		singBox := cfg["singBox"].(obj)
-		if singBox["socksListen"] != "127.0.0.1" {
-			return nil, cfgErr("mandatoryProxy", "家庭 SOCKS 必须只监听回环。")
-		}
-		if _, err = port(singBox["socksPort"]); err != nil {
-			return nil, err
-		}
-		if _, err = s.tlsPath(f["caFile"]); err != nil {
-			return nil, err
-		}
-		if err = checkKeys(cfg["reconnect"], []string{"intervalSeconds"}, []string{"intervalSeconds"}); err != nil {
-			return nil, err
-		}
-		if interval, ok := intValue(cfg["reconnect"].(obj)["intervalSeconds"]); !ok || interval < 1 || interval > 60 {
-			return nil, cfgErr("invalidReconnect", "重试间隔须为 1–60 秒。")
-		}
-		ca, ok := p["caCertificate"].(string)
-		if !ok || utf8.RuneCountInString(ca) > 32768 || strings.Contains(ca, "PRIVATE KEY") {
-			return nil, cfgErr("invalidCA", "CA 内容过大。")
-		}
-	}
-	for _, item := range refs {
-		ref, ok := item.owner[item.key].(string)
-		if _, present := values[ref]; !ok || !strings.HasPrefix(ref, "secret:") || !present {
-			return nil, cfgErr("missingSecret", "请设置必需的连接凭据。")
-		}
-		secret := values[ref]
-		if item.kind == "uuid" {
-			ok = parseUUID(secret)
-		} else {
-			token, isString := secret.(string)
-			length := utf8.RuneCountInString(token)
-			ok = isString && length >= 32 && length <= 4096
-		}
-		if !ok {
-			return nil, cfgErr("invalidSecret", "UUID 或 frp token 格式无效。")
-		}
-	}
-	if s.role == roleRelay && values[p["homeCredentialRef"].(string)] == values[p["appCredentialRef"].(string)] {
-		return nil, cfgErr("sharedIdentity", "App 与家庭端必须使用不同身份。")
-	}
-	if err = checkKeys(cfg["log"], []string{"level"}, []string{"level"}); err != nil {
-		return nil, err
-	}
-	switch cfg["log"].(obj)["level"] {
-	case "warn", "error", "info":
-	default:
-		return nil, cfgErr("invalidLog", "日志级别无效。")
-	}
-	if err = s.validateManagement(cfg["management"]); err != nil {
-		return nil, err
-	}
-	m := cfg["management"].(obj)
-	managementPort, _ := port(m["port"])
-	used := []int{proxyPort, controlPort, managementPort}
-	if s.role == roleHome {
-		socksPort, _ := port(cfg["singBox"].(obj)["socksPort"])
-		used = append(used, socksPort)
-	}
-	// A TLS SNI frontend may route one public port to two distinct loopback
-	// addresses. Wildcard, identical and mixed-family listeners must still be
-	// rejected, as must any collision with frps.
-	sharedLoopback := false
-	if s.role == roleRelay && proxyPort == managementPort && controlPort != managementPort {
-		proxyIP, errProxy := netip.ParseAddr(fmt.Sprint(p["listen"]))
-		managerIP, errManager := netip.ParseAddr(fmt.Sprint(m["listen"]))
-		sharedLoopback = errProxy == nil && errManager == nil && proxyIP.IsLoopback() && managerIP.IsLoopback() &&
-			proxyIP.Is4() == managerIP.Is4() && proxyIP != managerIP
-	}
-	if hasDuplicate(used) && !sharedLoopback {
-		return nil, cfgErr("portConflict", "组件与管理监听端口冲突。")
-	}
-	frontendIP, frontendPort, hasFrontend := frontendEndpoint(m)
-	if hasFrontend {
-		// proxy.port is the public port in App pairing files and Home grants,
-		// so the shared public entry must use it.
-		if frontendPort != proxyPort {
-			return nil, cfgErr("invalidFrontend", "公网入口端口须与代理端口（App/Home 连接的端口）一致。")
-		}
-		if proxyIP, err := netip.ParseAddr(fmt.Sprint(p["listen"])); err != nil || !proxyIP.Unmap().IsLoopback() {
-			return nil, cfgErr("invalidFrontend", "启用公网入口时，代理监听须为回环地址。")
-		}
-		managementPort, _ := port(m["port"])
-		if endpointConflict(frontendIP, frontendPort, fmt.Sprint(p["listen"]), proxyPort) ||
-			endpointConflict(frontendIP, frontendPort, fmt.Sprint(m["listen"]), managementPort) ||
-			endpointConflict(frontendIP, frontendPort, "127.0.0.1", controlPort) {
-			return nil, cfgErr("portConflict", "公网入口与代理、管理或 frps 监听冲突。")
-		}
-	}
-	services, ok := cfg["services"].([]any)
-	if !ok || len(services) < 1 || len(services) > 32 {
-		return nil, cfgErr("invalidServices", "请明确配置 1–32 个服务。")
-	}
-	var grants obj
-	if s.role == roleHome {
-		if grants, err = s.readGrants(); err != nil {
-			return nil, err
-		}
-		if len(grants) > 0 {
-			relayPort, _ := intValue(grants["relayPort"])
-			if grants["homeId"] != cfg["homeId"] || grants["relayHost"] != p["host"] || relayPort != int64(proxyPort) {
-				return nil, cfgErr("grantMismatch", "家庭或 relay 与已导入授权不匹配，请在本机重新导入可信授权。")
-			}
-		}
-	}
-	names, numbers := map[string]bool{}, map[int]bool{}
-	for _, value := range services {
-		if err = checkKeys(value, s.serviceFields(), s.serviceFields()); err != nil {
-			return nil, err
-		}
-		item := value.(obj)
-		name, err := identifier(item["serviceId"])
-		if err != nil {
-			return nil, err
-		}
-		number, err := port(item["relayPort"])
-		if err != nil {
-			return nil, err
-		}
-		if names[name] || numbers[number] || containsInt(used, number) || (hasFrontend && endpointConflict(frontendIP, frontendPort, "127.0.0.1", number)) {
-			return nil, cfgErr("portConflict", "服务引用或映射端口重复，或与组件监听冲突。")
-		}
-		names[name], numbers[number] = true, true
-		if s.role == roleHome {
-			target, err := host(item["targetHost"])
-			if err != nil {
-				return nil, err
-			}
-			targetPort, err := port(item["targetPort"])
-			if err != nil {
-				return nil, err
-			}
-			if len(grants) == 0 || !granted(grants, name, number) {
-				return nil, cfgErr("unauthorizedMapping", "映射未获 Relay 授权；Home 页面不能扩大映射范围。")
-			}
-			if (target == "127.0.0.1" || target == "localhost" || target == "::1") && containsInt(used, targetPort) {
-				return nil, cfgErr("targetConflict", "家庭服务不能指向本机管理或代理端口。")
-			}
-		}
-	}
-	return cfg, nil
-}
-
 // frontendEndpoint returns the optional public TLS entry of a validated
 // management section.
 func frontendEndpoint(management obj) (netip.Addr, int, bool) {
@@ -454,21 +147,6 @@ func endpointConflict(address netip.Addr, number int, other string, otherPort in
 		return true
 	}
 	return address.IsUnspecified() || otherAddress.IsUnspecified() || address.Unmap() == otherAddress.Unmap()
-}
-
-func granted(grants obj, name string, number int) bool {
-	list, _ := grants["services"].([]any)
-	for _, entry := range list {
-		pair, ok := entry.([]any)
-		if !ok || len(pair) != 2 {
-			continue
-		}
-		value, isInt := intValue(pair[1])
-		if pair[0] == name && isInt && value == int64(number) {
-			return true
-		}
-	}
-	return false
 }
 
 func hasDuplicate(values []int) bool {
@@ -641,56 +319,6 @@ func validPrivateKey(data []byte) bool {
 	}
 }
 
-func (s *Store) prepare(value, updatesValue any) (obj, obj, error) {
-	cfg, ok := clone(value).(obj)
-	if !ok {
-		return nil, nil, cfgErr("invalidFields", "配置字段缺失或包含未知字段。")
-	}
-	proxy, okProxy := cfg["proxy"].(obj)
-	frp, okFRP := cfg["frp"].(obj)
-	if !okProxy || !okFRP {
-		return nil, nil, cfgErr("invalidFields", "配置字段缺失或包含未知字段。")
-	}
-	values, err := s.secrets()
-	if err != nil {
-		return nil, nil, err
-	}
-	if updatesValue == nil {
-		updatesValue = obj{}
-	}
-	if err = checkKeys(updatesValue, []string{"homeUUID", "appUUID", "frpToken"}, nil); err != nil {
-		return nil, nil, err
-	}
-	type target struct {
-		owner obj
-		key   string
-	}
-	fields := map[string]target{"homeUUID": {proxy, "homeCredentialRef"}, "frpToken": {frp, "credentialRef"}}
-	if s.role == roleRelay {
-		fields["appUUID"] = target{proxy, "appCredentialRef"}
-	}
-	for field, update := range updatesValue.(obj) {
-		destination, ok := fields[field]
-		if !ok {
-			return nil, nil, cfgErr("invalidSecret", "此端不支持该机密字段。")
-		}
-		if update == nil {
-			continue // untouched
-		}
-		if text, isString := update.(string); isString && text == "" {
-			destination.owner[destination.key] = "" // explicit clear; required references fail validation
-			continue
-		}
-		ref := "secret:" + tokenHex(16)
-		values[ref] = update
-		destination.owner[destination.key] = ref
-	}
-	if _, err = s.validate(cfg, values); err != nil {
-		return nil, nil, err
-	}
-	return cfg, values, nil
-}
-
 func (s *Store) revisionClock(fallback int64) (int64, error) {
 	path := s.file("revision.json")
 	if !exists(path) {
@@ -787,9 +415,9 @@ func (s *Store) test(value, updates any) (obj, error) {
 	// or media requests are sent and no production component is restarted.
 	var reachable any
 	if s.role == roleHome {
-		proxy := cfg["proxy"].(obj)
-		proxyPort, _ := port(proxy["port"])
-		connection, err := net.DialTimeout("tcp", net.JoinHostPort(proxy["host"].(string), strconv.Itoa(proxyPort)), 2*time.Second)
+		outbound := section(cfg, "singBox", "outbound")
+		proxyPort, _ := port(outbound["server_port"])
+		connection, err := net.DialTimeout("tcp", net.JoinHostPort(stringValue(outbound["server"]), strconv.Itoa(proxyPort)), 2*time.Second)
 		reachable = err == nil
 		if connection != nil {
 			connection.Close()
@@ -1095,41 +723,6 @@ func (s *Store) restore(expected any) (obj, error) {
 	return s.save(cfg, expected, nil)
 }
 
-// collectSecrets drops secret values no longer referenced by the current,
-// backup, last applied or previously applied configuration. Any unreadable
-// file aborts collection rather than risking a referenced key.
-func (s *Store) collectSecrets() {
-	references := map[string]bool{}
-	for _, name := range []string{s.role + ".json", s.role + ".backup.json", "last-good.json", "previous-good.json"} {
-		if !exists(s.file(name)) {
-			continue
-		}
-		cfg, err := readObj(s.file(name))
-		if err != nil {
-			return
-		}
-		for _, section := range []string{"proxy", "frp"} {
-			owner, _ := cfg[section].(obj)
-			for key, value := range owner {
-				if ref, ok := value.(string); ok && (strings.HasSuffix(key, "CredentialRef") || key == "credentialRef") {
-					references[ref] = true
-				}
-			}
-		}
-	}
-	values, err := s.secrets()
-	if err != nil {
-		return
-	}
-	kept := obj{}
-	for key, value := range values {
-		if references[key] {
-			kept[key] = value
-		}
-	}
-	_ = atomicWrite(s.file("secrets.json"), kept)
-}
-
 func (s *Store) tlsFiles() []string {
 	result := []string{}
 	entries, err := os.ReadDir(s.file("tls"))
@@ -1143,105 +736,6 @@ func (s *Store) tlsFiles() []string {
 	}
 	sort.Strings(result)
 	return result
-}
-
-// importLegacy initialises an empty state directory from the previous flat
-// deployment format. It never overwrites an existing authoritative file.
-func (s *Store) importLegacy(raw obj, homeID string) (obj, error) {
-	if exists(s.path) {
-		return nil, cfgErr("alreadyInitialized", "已有配置，禁止覆盖初始化。", 409)
-	}
-	raw = cloneObj(raw)
-	if homeID == "" {
-		homeID, _ = raw["homeId"].(string)
-		if homeID == "" {
-			homeID = "home-main"
-		}
-	}
-	cfg := s.blank()
-	if _, err := identifier(homeID); err != nil {
-		return nil, err
-	}
-	cfg["homeId"] = homeID
-	p, ok := raw["proxy"].(obj)
-	if !ok {
-		return nil, errors.New("legacy configuration has no proxy section")
-	}
-	proxy, frp := cfg["proxy"].(obj), cfg["frp"].(obj)
-	proxy["host"], proxy["port"], proxy["serverName"] = p["host"], p["port"], p["serverName"]
-	frp["controlPort"] = valueOr(raw, "controlPort", json.Number("7000"))
-	directory := s.file("tls")
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return nil, err
-	}
-	copyTLS := func(source any, label string) (string, error) {
-		path, _ := source.(string)
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return "", err
-		}
-		if len(data) > 131072 {
-			return "", cfgErr("invalidCertificate", "TLS 文件过大。")
-		}
-		if err = writeSynced(filepath.Join(directory, label), data); err != nil {
-			return "", err
-		}
-		return "tls/" + label, nil
-	}
-	var err error
-	if s.role == roleRelay {
-		proxy["listen"] = valueOr(raw, "listen", "0.0.0.0")
-		for _, item := range []struct {
-			owner       obj
-			key, source string
-			from        obj
-			label       string
-		}{
-			{proxy, "certificateFile", "certificatePath", p, "proxy.crt"}, {proxy, "keyFile", "keyPath", p, "proxy.key"},
-			{frp, "certificateFile", "frpCertificatePath", raw, "frps.crt"}, {frp, "keyFile", "frpKeyPath", raw, "frps.key"},
-		} {
-			if item.owner[item.key], err = copyTLS(item.from[item.source], item.label); err != nil {
-				return nil, err
-			}
-		}
-	} else {
-		proxy["caCertificate"] = valueOr(p, "caCertificate", "")
-		cfg["singBox"].(obj)["socksPort"] = valueOr(raw, "socksPort", json.Number("1080"))
-		frp["serverName"] = raw["frpServerName"]
-		if frp["caFile"], err = copyTLS(raw["frpCAPath"], "frps-ca.crt"); err != nil {
-			return nil, err
-		}
-	}
-	services := []any{}
-	grantList := []any{}
-	legacyServices, _ := raw["services"].([]any)
-	for _, value := range legacyServices {
-		legacy, _ := value.(obj)
-		service := obj{"serviceId": legacy["id"], "relayPort": legacy["remotePort"]}
-		if s.role == roleHome {
-			service["targetHost"], service["targetPort"] = legacy["localHost"], legacy["localPort"]
-		}
-		services = append(services, service)
-		grantList = append(grantList, []any{legacy["id"], legacy["remotePort"]})
-	}
-	cfg["services"] = services
-	if s.role == roleHome {
-		if err = atomicWrite(s.file("grants.json"), obj{"homeId": homeID, "relayHost": p["host"], "relayPort": p["port"], "services": grantList}); err != nil {
-			return nil, err
-		}
-	}
-	updates := obj{"homeUUID": p["homeUUID"], "frpToken": raw["frpToken"]}
-	if s.role == roleRelay {
-		updates["appUUID"] = p["appUUID"]
-	}
-	return s.save(cfg, 0, updates)
-}
-
-func valueOr(source obj, key string, fallback any) any {
-	if value, ok := source[key]; ok {
-		return value
-	}
-	return fallback
 }
 
 // writeRuntimeState publishes component state for CLI status/apply.

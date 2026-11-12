@@ -347,13 +347,7 @@ func (m *ManagerServer) handle(w http.ResponseWriter, r *http.Request, write boo
 		if err != nil {
 			return err
 		}
-		var grants any
-		if role == roleHome && exists(store.file("grants.json")) {
-			if grants, err = store.readGrants(); err != nil {
-				return err
-			}
-		}
-		m.reply(w, 200, obj{"config": cfg, "role": role, "tlsFiles": store.tlsFiles(), "grants": grants}, nil)
+		m.reply(w, 200, obj{"config": cfg, "role": role, "tlsFiles": store.tlsFiles()}, nil)
 	case !write && path == "/api/recovery":
 		info, err := store.recoveryInfo()
 		if err != nil {

@@ -39,7 +39,7 @@ func cmdPair(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("Created canonical relay/ and home/ configuration directories and App pairing in", root)
+	fmt.Println("Created relay/, home/ and app.json in", root)
 	return nil
 }
 
@@ -79,8 +79,8 @@ func newUUID() string {
 }
 
 // pair creates one household's relay/ and home/ state directories and the
-// App pairing file. It refuses an existing output directory so credentials
-// are never rotated implicitly.
+// App file (a sing-box outbound plus the frpc proxies it may use). It refuses
+// an existing output directory so credentials are never rotated implicitly.
 func pair(options pairOptions) (string, error) {
 	if err := os.Mkdir(options.Output, 0o700); err != nil {
 		return "", err
@@ -89,11 +89,11 @@ func pair(options pairOptions) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	certificatePath, err := filepath.Abs(options.Certificate)
+	proxyCert, err := os.ReadFile(options.Certificate)
 	if err != nil {
 		return "", err
 	}
-	keyPath, err := filepath.Abs(options.Key)
+	proxyKey, err := os.ReadFile(options.Key)
 	if err != nil {
 		return "", err
 	}
@@ -101,17 +101,6 @@ func pair(options pairOptions) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	transient := map[string][]byte{"frps.crt": frpsCert, "frps.key": frpsKey}
-	for name, data := range transient {
-		if err = writeSynced(filepath.Join(root, name), data); err != nil {
-			return "", err
-		}
-	}
-	defer func() {
-		for name := range transient {
-			_ = os.Remove(filepath.Join(root, name))
-		}
-	}()
 	caCertificate := ""
 	if options.ProxyCA != "" {
 		data, err := os.ReadFile(options.ProxyCA)
@@ -120,46 +109,63 @@ func pair(options pairOptions) (string, error) {
 		}
 		caCertificate = string(data)
 	}
-	appUUID, homeUUID := newUUID(), newUUID()
-	token := tokenURLSafe(48)
-	homeID, lineID := "home-"+newUUID(), "line-"+newUUID()
-	proxy := obj{"host": options.Host, "port": options.Port, "serverName": options.TLSName, "appUUID": appUUID, "homeUUID": homeUUID,
-		"certificatePath": certificatePath, "keyPath": keyPath}
-	if caCertificate != "" {
-		proxy["caCertificate"] = caCertificate
+	appUUID, homeUUID, token := newUUID(), newUUID(), tokenURLSafe(48)
+	const remotePort = 18096
+
+	relay, err := NewStore(filepath.Join(root, roleRelay), roleRelay)
+	if err != nil {
+		return "", err
 	}
-	service := obj{"id": "jellyfin", "remotePort": 18096}
-	relayLegacy := obj{"homeId": homeID, "proxy": proxy, "frpToken": token, "controlPort": 7000, "services": []any{service},
-		"frpCertificatePath": filepath.Join(root, "frps.crt"), "frpKeyPath": filepath.Join(root, "frps.key")}
-	homeProxy := obj{}
-	for key, value := range proxy {
-		if key != "appUUID" && key != "certificatePath" && key != "keyPath" {
-			homeProxy[key] = value
+	for name, data := range map[string][]byte{"proxy.crt": proxyCert, "proxy.key": proxyKey, "frps.crt": frpsCert, "frps.key": frpsKey} {
+		if err = os.MkdirAll(relay.file("tls"), 0o700); err != nil {
+			return "", err
+		}
+		if err = writeSynced(relay.file("tls/"+name), data); err != nil {
+			return "", err
 		}
 	}
-	homeLegacy := obj{"homeId": homeID, "proxy": homeProxy, "frpToken": token, "controlPort": 7000, "socksPort": 1080,
-		"frpServerName": "openplayx-frps", "frpCAPath": filepath.Join(root, "frps.crt"),
-		"services": []any{obj{"id": "jellyfin", "remotePort": 18096, "localHost": "192.168.50.10", "localPort": 8096}}}
+	relayCfg := relay.blank()
+	inbound := section(relayCfg, "singBox", "inbound")
+	inbound["listen_port"] = options.Port
+	section(inbound, "tls")["server_name"] = options.TLSName
+	section(inbound, "tls")["certificate_path"], section(inbound, "tls")["key_path"] = "tls/proxy.crt", "tls/proxy.key"
+	frpsTLS := section(relayCfg, "frps", "transport", "tls")
+	frpsTLS["certFile"], frpsTLS["keyFile"] = "tls/frps.crt", "tls/frps.key"
+	if _, err = relay.save(relayCfg, 0, obj{"uuid:home": homeUUID, "uuid:app": appUUID, "token": token}); err != nil {
+		return "", err
+	}
+
+	// Home never receives the App identity or Relay private keys.
+	home, err := NewStore(filepath.Join(root, roleHome), roleHome)
+	if err != nil {
+		return "", err
+	}
+	if err = os.MkdirAll(home.file("tls"), 0o700); err != nil {
+		return "", err
+	}
+	if err = writeSynced(home.file("tls/frps-ca.crt"), frpsCert); err != nil {
+		return "", err
+	}
+	homeCfg := home.blank()
+	outbound := section(homeCfg, "singBox", "outbound")
+	outbound["server"], outbound["server_port"] = options.Host, options.Port
+	section(outbound, "tls")["server_name"], section(outbound, "tls")["certificate"] = options.TLSName, caCertificate
+	section(homeCfg, "frpc", "transport", "tls")["trustedCaFile"] = "tls/frps-ca.crt"
+	section(homeCfg, "frpc")["proxies"] = []any{obj{"name": "jellyfin", "type": "tcp", "localIP": "192.168.50.10", "localPort": 8096, "remotePort": remotePort}}
+	if _, err = home.save(homeCfg, 0, obj{"uuid": homeUUID, "token": token}); err != nil {
+		return "", err
+	}
+
 	tls := obj{"enabled": true, "server_name": options.TLSName}
 	if caCertificate != "" {
 		tls["certificate"] = caCertificate
 	}
-	app := obj{"version": 1, "lineId": lineID, "homeId": homeID, "serviceId": "jellyfin", "remotePort": 18096,
-		"remoteAddress": "http://jellyfin.home.invalid:8096",
-		"outbound":      obj{"type": "vless", "server": options.Host, "server_port": options.Port, "uuid": appUUID, "tls": tls}}
-	if err = atomicWrite(filepath.Join(root, "app-jellyfin.json"), app); err != nil {
-		return "", err
+	app := obj{
+		"outbound": obj{"type": "vless", "tag": "relay", "server": options.Host, "server_port": options.Port, "uuid": appUUID, "tls": tls},
+		"proxies":  []any{obj{"name": "jellyfin", "remotePort": remotePort}},
 	}
-	// Each side receives its own directory; Home never receives the App
-	// identity or Relay private keys.
-	for side, legacy := range map[string]obj{roleRelay: relayLegacy, roleHome: homeLegacy} {
-		store, err := NewStore(filepath.Join(root, side), side)
-		if err != nil {
-			return "", err
-		}
-		if _, err = store.importLegacy(legacy, homeID); err != nil {
-			return "", err
-		}
+	if err = atomicWrite(filepath.Join(root, "app.json"), app); err != nil {
+		return "", err
 	}
 	return root, nil
 }

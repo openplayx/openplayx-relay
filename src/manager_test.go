@@ -76,7 +76,7 @@ func TestSharedTLSPortRequiresDistinctSameFamilyLoopbackAddresses(t *testing.T) 
 	f := newFixture(t, roleRelay)
 	values, _ := f.store.secrets()
 	cfg := cloneObj(f.saved)
-	cfg["proxy"].(obj)["listen"], cfg["proxy"].(obj)["port"] = "127.0.0.1", 443
+	section(cfg, "singBox", "inbound")["listen"], section(cfg, "singBox", "inbound")["listen_port"] = "127.0.0.1", 443
 	management := cfg["management"].(obj)
 	management["listen"], management["port"], management["https"] = "127.0.0.2", 443, true
 	management["certificateFile"], management["keyFile"] = "tls/proxy.crt", "tls/proxy.key"
@@ -86,12 +86,12 @@ func TestSharedTLSPortRequiresDistinctSameFamilyLoopbackAddresses(t *testing.T) 
 	}
 	for _, pair := range [][2]string{{"127.0.0.1", "127.0.0.1"}, {"0.0.0.0", "127.0.0.2"}, {"127.0.0.1", "::1"}} {
 		invalid := cloneObj(cfg)
-		invalid["proxy"].(obj)["listen"], invalid["management"].(obj)["listen"] = pair[0], pair[1]
+		section(invalid, "singBox", "inbound")["listen"], invalid["management"].(obj)["listen"] = pair[0], pair[1]
 		if _, err := f.store.validate(invalid, values); err == nil {
 			t.Fatalf("accepted %v", pair)
 		}
 	}
-	cfg["frp"].(obj)["controlPort"] = json.Number("443")
+	setBindPort(cfg, 443)
 	if _, err := f.store.validate(cfg, values); err == nil {
 		t.Fatal("accepted frps on the shared port")
 	}
@@ -183,24 +183,39 @@ func TestTLSImportIsBoundedPrivateAndNotAPathWriteAPI(t *testing.T) {
 
 func TestBackendRejectsPathsPortsUnknownFieldsAndUnauthorizedMapping(t *testing.T) {
 	forRoles(t, func(t *testing.T, f *fixture) {
-		for _, change := range []string{"port", "path", "field", "mapping"} {
+		for _, change := range []string{"port", "path", "field", "nested", "mapping", "identity"} {
 			cfg := cloneObj(f.saved)
+			relay := f.store.role == roleRelay
 			switch change {
 			case "port":
-				cfg["services"].([]any)[0].(obj)["relayPort"] = cfg["frp"].(obj)["controlPort"]
-			case "path":
-				key := "keyFile"
-				if f.store.role == roleHome {
-					key = "caFile"
+				if relay {
+					section(cfg, "frps")["bindPort"] = section(cfg, "singBox", "inbound")["listen_port"]
+				} else {
+					cfg["frpc"].(obj)["proxies"].([]any)[0].(obj)["remotePort"] = section(cfg, "frpc")["serverPort"]
 				}
-				cfg["frp"].(obj)[key] = "../../arbitrary"
+			case "path":
+				if relay {
+					section(cfg, "frps", "transport", "tls")["keyFile"] = "../../arbitrary"
+				} else {
+					section(cfg, "frpc", "transport", "tls")["trustedCaFile"] = "../../arbitrary"
+				}
 			case "field":
 				cfg["shellCommand"] = "whoami"
-			default:
-				if f.store.role == roleHome {
-					cfg["services"].([]any)[0].(obj)["relayPort"] = 19000
+			case "nested":
+				section(cfg, "singBox")["experimental"] = obj{"clash_api": obj{}}
+			case "mapping":
+				if relay {
+					// A route rule may not open ports outside frps.bindPort/allowPorts.
+					section(cfg, "singBox", "route")["rules"] = append(section(cfg, "singBox", "route")["rules"].([]any), obj{"auth_user": []any{"app"}, "port": []any{22}})
 				} else {
-					cfg["proxy"].(obj)["appCredentialRef"] = cfg["proxy"].(obj)["homeCredentialRef"]
+					cfg["frpc"].(obj)["proxies"].([]any)[0].(obj)["type"] = "http"
+				}
+			default:
+				if relay {
+					users := section(cfg, "singBox", "inbound")["users"].([]any)
+					users[1].(obj)["uuid"] = users[0].(obj)["uuid"]
+				} else {
+					section(cfg, "singBox", "outbound")["uuid"] = "11111111-1111-4111-8111-111111111111"
 				}
 			}
 			if _, err := f.store.save(cloneObj(cfg), 1, nil); err == nil {
@@ -285,12 +300,16 @@ func TestPreviousRuntimeSecretsSurviveMultiplePendingRotations(t *testing.T) {
 		if _, err := f.store.apply(1, controller); err != nil {
 			t.Fatal(err)
 		}
-		oldRef := f.saved["frp"].(obj)["credentialRef"].(string)
-		second, err := f.store.save(cloneObj(f.saved), 1, obj{"frpToken": repeat("replacement-token-B-", 4)})
+		owner := "frps"
+		if f.store.role == roleHome {
+			owner = "frpc"
+		}
+		oldRef := section(f.saved, owner, "auth")["token"].(string)
+		second, err := f.store.save(cloneObj(f.saved), 1, obj{"token": repeat("replacement-token-B-", 4)})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err = f.store.save(second, 2, obj{"frpToken": repeat("replacement-token-C-", 4)}); err != nil {
+		if _, err = f.store.save(second, 2, obj{"token": repeat("replacement-token-C-", 4)}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err = f.store.apply(3, controller); err != nil {
@@ -347,22 +366,51 @@ func TestRenderedConfigBoundaries(t *testing.T) {
 }
 
 func TestMappingCollisionAndWeakCredentialsRejected(t *testing.T) {
-	for _, role := range roles {
-		d := &deployment{Role: role, ProxyHost: "relay.example.com", ProxyPort: 443, ServerName: "relay.example.com", HomeUUID: newUUID(), AppUUID: newUUID(),
-			FRPToken: repeat("x", 32), ControlPort: 7000, LogLevel: "warn", SocksPort: 1080, FRPServer: "openplayx-frps", FRPCA: "/ca",
-			Services: []serviceMapping{{ID: "jellyfin", RemotePort: 18096, LocalHost: "192.168.1.2", LocalPort: 8096}}}
-		if _, _, err := render(d); err != nil {
-			t.Fatal(err)
+	forRoles(t, func(t *testing.T, f *fixture) {
+		duplicate := cloneObj(f.saved)
+		if f.store.role == roleRelay {
+			users := section(duplicate, "singBox", "inbound")["users"].([]any)
+			users[1].(obj)["name"] = users[0].(obj)["name"]
+		} else {
+			proxies := section(duplicate, "frpc")["proxies"].([]any)
+			second := cloneObj(proxies[0].(obj))
+			second["name"] = "other"
+			section(duplicate, "frpc")["proxies"] = append(proxies, second)
 		}
-		d.Services = append(d.Services, d.Services[0])
-		if _, _, err := render(d); err == nil {
-			t.Fatal("duplicate mapping accepted")
+		if _, _, err := f.store.prepare(duplicate, nil); err == nil {
+			t.Fatal("duplicate user / remotePort accepted")
 		}
-		d.Services = d.Services[:1]
-		d.FRPToken = "weak"
-		if _, _, err := render(d); err == nil {
-			t.Fatal("weak token accepted")
+		_, _, err := f.store.prepare(cloneObj(f.saved), obj{"token": "weak"})
+		expectCode(t, err, "invalidSecret")
+		_, _, err = f.store.prepare(cloneObj(f.saved), obj{"uuid:nobody": newUUID()})
+		expectCode(t, err, "invalidSecret")
+	})
+}
+
+func TestRouteRulesStayWithinFRPSPorts(t *testing.T) {
+	f := newFixture(t, roleRelay)
+	values, _ := f.store.secrets()
+	appRule := func(c obj) obj { return section(c, "singBox", "route")["rules"].([]any)[1].(obj) }
+	for name, change := range map[string]func(c obj){
+		"unknown user":       func(c obj) { appRule(c)["auth_user"] = []any{"ghost"} },
+		"range beyond allow": func(c obj) { appRule(c)["port_range"] = []any{"18000:19000"} },
+		"bad range":          func(c obj) { appRule(c)["port_range"] = []any{"18999:18000"} },
+		"no ports":           func(c obj) { delete(appRule(c), "port_range") },
+		"unknown rule field": func(c obj) { appRule(c)["outbound"] = "direct" },
+		"allow covers bind":  func(c obj) { section(c, "frps")["allowPorts"] = []any{obj{"start": 6000, "end": 8000}} },
+		"allow both forms":   func(c obj) { section(c, "frps")["allowPorts"] = []any{obj{"single": 18000, "end": 18001}} },
+	} {
+		invalid := cloneObj(f.saved)
+		change(invalid)
+		if _, err := f.store.validate(cloneObj(invalid), values); err == nil {
+			t.Fatalf("%s accepted", name)
 		}
+	}
+	valid := cloneObj(f.saved)
+	section(valid, "frps")["allowPorts"] = []any{obj{"single": 18096}, obj{"start": 18400, "end": 18499}}
+	section(valid, "singBox", "route")["rules"].([]any)[1] = obj{"auth_user": []any{"app"}, "port": []any{18096}, "port_range": []any{"18400:18450"}}
+	if _, err := f.store.validate(valid, values); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -405,44 +453,45 @@ func TestPairingRoleCredentialsAndNoOverwrite(t *testing.T) {
 	paired := options.Output
 	cfg, _ := readObj(filepath.Join(paired, "relay/relay.json"))
 	home, _ := readObj(filepath.Join(paired, "home/home.json"))
-	app, _ := readObj(filepath.Join(paired, "app-jellyfin.json"))
+	app, _ := readObj(filepath.Join(paired, "app.json"))
 	relaySecrets, _ := readObj(filepath.Join(paired, "relay/secrets.json"))
 	homeSecrets, _ := readObj(filepath.Join(paired, "home/secrets.json"))
+	users := map[string]any{}
+	for _, item := range section(cfg, "singBox", "inbound")["users"].([]any) {
+		users[item.(obj)["name"].(string)] = relaySecrets[item.(obj)["uuid"].(string)]
+	}
 	appUUID := app["outbound"].(obj)["uuid"]
-	if relaySecrets[cfg["proxy"].(obj)["appCredentialRef"].(string)] != appUUID {
+	if users["app"] != appUUID {
 		t.Fatal("app uuid mismatch")
 	}
-	if relaySecrets[cfg["proxy"].(obj)["homeCredentialRef"].(string)] != homeSecrets[home["proxy"].(obj)["homeCredentialRef"].(string)] {
+	if users["home"] != homeSecrets[section(home, "singBox", "outbound")["uuid"].(string)] {
 		t.Fatal("home uuid mismatch")
+	}
+	if relaySecrets[section(cfg, "frps", "auth")["token"].(string)] != homeSecrets[section(home, "frpc", "auth")["token"].(string)] {
+		t.Fatal("frp token mismatch")
 	}
 	if home["management"].(obj)["listen"] != "0.0.0.0" || cfg["management"].(obj)["listen"] != "127.0.0.1" {
 		t.Fatal("management defaults")
-	}
-	if cfg["homeId"] != home["homeId"] || cfg["homeId"] != app["homeId"] {
-		t.Fatal("home id mismatch")
-	}
-	if _, ok := home["proxy"].(obj)["appCredentialRef"]; ok {
-		t.Fatal("home received app reference")
 	}
 	for _, value := range homeSecrets {
 		if value == appUUID {
 			t.Fatal("home received app uuid")
 		}
 	}
-	if _, ok := app["frpToken"]; ok {
-		t.Fatal("app received frp token")
+	if exists(filepath.Join(paired, "home/tls/frps.key")) || exists(filepath.Join(paired, "frps.key")) {
+		t.Fatal("frps key left outside relay/")
 	}
-	for _, name := range []string{"deployment.json", "frps.key", "frps.crt"} {
-		if exists(filepath.Join(paired, name)) {
-			t.Fatal(name + " left behind")
+	if canonical(app["proxies"]) != `[{"name":"jellyfin","remotePort":18096}]` || len(app) != 2 {
+		t.Fatalf("app file %v", app)
+	}
+	// Both generated directories pass the embedded upstream checks as-is.
+	for _, side := range roles {
+		store, _ := NewStore(filepath.Join(paired, side), side)
+		saved, _ := store.load()
+		values, _ := store.secrets()
+		if _, err := store.plan(saved, values); err != nil {
+			t.Fatalf("paired %s config fails checks: %v", side, err)
 		}
-	}
-	// Both generated directories pass the embedded upstream checks as-is,
-	// except that Home's example target must be edited first.
-	relayStore, _ := NewStore(filepath.Join(paired, "relay"), roleRelay)
-	values, _ := relayStore.secrets()
-	if _, err := relayStore.plan(cfg, values); err != nil {
-		t.Fatalf("paired relay config fails checks: %v", err)
 	}
 	if _, err := pair(options); err == nil {
 		t.Fatal("existing output overwritten")
@@ -693,7 +742,7 @@ func TestExistingLoopbackConfigurationRequiresExplicitRevisionedMigration(t *tes
 		t.Fatal(err)
 	}
 	if canonical(migrated["revision"]) != "3" || migrated["management"].(obj)["listen"] != "0.0.0.0" ||
-		canonical(migrated["proxy"]) != canonical(initial["proxy"]) || canonical(migrated["services"]) != canonical(initial["services"]) {
+		canonical(migrated["singBox"]) != canonical(initial["singBox"]) || canonical(migrated["frpc"]) != canonical(initial["frpc"]) {
 		t.Fatalf("migration %v", migrated)
 	}
 	if exists(f.store.file("status.json")) {
@@ -707,7 +756,7 @@ func frontendConfig(t *testing.T, f *fixture) obj {
 		t.Fatal(err)
 	}
 	cfg := cloneObj(f.saved)
-	cfg["proxy"].(obj)["listen"], cfg["proxy"].(obj)["port"] = "127.0.0.1", 443
+	section(cfg, "singBox", "inbound")["listen"], section(cfg, "singBox", "inbound")["listen_port"] = "127.0.0.1", 443
 	management := cfg["management"].(obj)
 	management["https"], management["certificateFile"], management["keyFile"] = true, "tls/proxy.crt", "tls/proxy.key"
 	management["allowedHosts"] = []any{"203.0.113.10"}
@@ -726,7 +775,7 @@ func TestPublicFrontendValidation(t *testing.T) {
 		"loopback entry":       func(c obj) { c["management"].(obj)["frontend"].(obj)["listen"] = "127.0.0.3" },
 		"wildcard entry":       func(c obj) { c["management"].(obj)["frontend"].(obj)["listen"] = "0.0.0.0" },
 		"not the proxy port":   func(c obj) { c["management"].(obj)["frontend"].(obj)["port"] = 8443 },
-		"public proxy listen":  func(c obj) { c["proxy"].(obj)["listen"] = "0.0.0.0" },
+		"public proxy listen":  func(c obj) { section(c, "singBox", "inbound")["listen"] = "0.0.0.0" },
 		"plain HTTP manager":   func(c obj) { c["management"].(obj)["https"] = false },
 		"unknown entry field":  func(c obj) { c["management"].(obj)["frontend"].(obj)["sni"] = "x" },
 		"manager on the entry": func(c obj) { c["management"].(obj)["listen"], c["management"].(obj)["port"] = "203.0.113.10", 443 },

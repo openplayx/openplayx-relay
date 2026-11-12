@@ -108,26 +108,20 @@ func newFixture(t *testing.T, role string) *fixture {
 		writeFile(t, store.file("tls/"+name), data)
 	}
 	cfg := store.blank()
-	service := obj{"serviceId": "jellyfin", "relayPort": 18096}
+	var updates obj
 	if role == roleRelay {
-		proxy, frp := cfg["proxy"].(obj), cfg["frp"].(obj)
-		proxy["certificateFile"], proxy["keyFile"] = "tls/proxy.crt", "tls/proxy.key"
-		proxy["listen"] = "127.0.0.1"
-		proxy["port"] = freePort(t)
-		frp["certificateFile"], frp["keyFile"] = "tls/frps.crt", "tls/frps.key"
+		inbound := section(cfg, "singBox", "inbound")
+		inbound["listen"], inbound["listen_port"] = "127.0.0.1", freePort(t)
+		section(inbound, "tls")["certificate_path"], section(inbound, "tls")["key_path"] = "tls/proxy.crt", "tls/proxy.key"
+		frpsTLS := section(cfg, "frps", "transport", "tls")
+		frpsTLS["certFile"], frpsTLS["keyFile"] = "tls/frps.crt", "tls/frps.key"
+		updates = obj{"uuid:home": "11111111-1111-4111-8111-111111111111", "uuid:app": "22222222-2222-4222-8222-222222222222", "token": repeat("test-token-", 6)}
 	} else {
-		service["targetHost"], service["targetPort"] = "192.168.50.10", 8096
-		cfg["frp"].(obj)["caFile"] = "tls/ca.crt"
-		if err = atomicWrite(store.file("grants.json"), obj{"homeId": "home-main", "relayHost": "relay.example.com", "relayPort": 443, "services": []any{[]any{"jellyfin", 18096}}}); err != nil {
-			t.Fatal(err)
-		}
+		section(cfg, "frpc", "transport", "tls")["trustedCaFile"] = "tls/ca.crt"
+		section(cfg, "frpc")["proxies"] = []any{obj{"name": "jellyfin", "type": "tcp", "localIP": "192.168.50.10", "localPort": 8096, "remotePort": 18096}}
+		updates = obj{"uuid": "11111111-1111-4111-8111-111111111111", "token": repeat("test-token-", 6)}
 	}
-	cfg["services"] = []any{service}
 	cfg = cloneObj(cfg)
-	updates := obj{"homeUUID": "11111111-1111-4111-8111-111111111111", "frpToken": repeat("test-token-", 6)}
-	if role == roleRelay {
-		updates["appUUID"] = "22222222-2222-4222-8222-222222222222"
-	}
 	saved, err := store.save(cfg, 0, updates)
 	if err != nil {
 		t.Fatal(err)
@@ -149,4 +143,12 @@ func expectCode(t *testing.T, err error, code string) {
 	if !ok || (code != "" && configError.Code != code) {
 		t.Fatalf("expected ConfigError %q, got %v", code, err)
 	}
+}
+
+// setBindPort moves frps.bindPort together with the route rule that lets the
+// home user reach it.
+func setBindPort(cfg obj, number int) {
+	section(cfg, "frps")["bindPort"] = number
+	rules := section(cfg, "singBox", "route")["rules"].([]any)
+	rules[0].(obj)["port"] = []any{number}
 }

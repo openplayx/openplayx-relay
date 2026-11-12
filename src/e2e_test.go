@@ -139,20 +139,40 @@ func TestEndToEnd(t *testing.T) {
 	proxyPort, control, mapping, socks := freePort(t), freePort(t), freePort(t), freePort(t)
 	appUUID, homeUUID := newUUID(), newUUID()
 	token := repeat("integration-test-token-", 3)
-	relayLegacy := obj{"listen": "127.0.0.1", "proxy": obj{"host": "127.0.0.1", "port": proxyPort, "serverName": "localhost", "appUUID": appUUID,
-		"homeUUID": homeUUID, "certificatePath": certPath, "keyPath": keyPath}, "frpToken": token, "controlPort": control,
-		"services": []any{obj{"id": "jellyfin", "remotePort": mapping}}, "frpCertificatePath": certPath, "frpKeyPath": keyPath}
-	homeLegacy := obj{"proxy": obj{"host": "127.0.0.1", "port": proxyPort, "serverName": "localhost", "homeUUID": homeUUID, "caCertificate": string(certificate)},
-		"frpToken": token, "controlPort": control, "socksPort": socks, "frpCAPath": certPath, "frpServerName": "localhost",
-		"services": []any{obj{"id": "jellyfin", "remotePort": mapping, "localHost": "127.0.0.1", "localPort": mediaPort}}}
-
 	relayStore, _ := NewStore(filepath.Join(root, "relay-state"), roleRelay)
 	homeStore, _ := NewStore(filepath.Join(root, "home-state"), roleHome)
-	relayCfg, err := relayStore.importLegacy(relayLegacy, "")
+	for name, data := range map[string][]byte{"tls.crt": certificate, "tls.key": key} {
+		writeFile(t, relayStore.file("tls/"+name), data)
+	}
+	writeFile(t, homeStore.file("tls/ca.crt"), certificate)
+
+	relayDraft := relayStore.blank()
+	inbound := section(relayDraft, "singBox", "inbound")
+	inbound["listen"], inbound["listen_port"] = "127.0.0.1", proxyPort
+	section(inbound, "tls")["server_name"] = "localhost"
+	section(inbound, "tls")["certificate_path"], section(inbound, "tls")["key_path"] = "tls/tls.crt", "tls/tls.key"
+	section(relayDraft, "singBox", "route")["rules"] = []any{
+		obj{"auth_user": []any{"home"}, "port": []any{control}},
+		obj{"auth_user": []any{"app"}, "port": []any{mapping}},
+	}
+	frps := section(relayDraft, "frps")
+	frps["bindPort"], frps["allowPorts"] = control, []any{obj{"single": mapping}}
+	section(frps, "transport", "tls")["certFile"], section(frps, "transport", "tls")["keyFile"] = "tls/tls.crt", "tls/tls.key"
+	relayCfg, err := relayStore.save(relayDraft, 0, obj{"uuid:home": homeUUID, "uuid:app": appUUID, "token": token})
 	if err != nil {
 		t.Fatal(err)
 	}
-	homeCfg, err := homeStore.importLegacy(homeLegacy, "")
+
+	homeDraft := homeStore.blank()
+	section(homeDraft, "singBox", "inbound")["listen_port"] = socks
+	outboundCfg := section(homeDraft, "singBox", "outbound")
+	outboundCfg["server"], outboundCfg["server_port"] = "127.0.0.1", proxyPort
+	section(outboundCfg, "tls")["server_name"], section(outboundCfg, "tls")["certificate"] = "localhost", string(certificate)
+	frpc := section(homeDraft, "frpc")
+	frpc["serverPort"] = control
+	section(frpc, "transport", "tls")["serverName"], section(frpc, "transport", "tls")["trustedCaFile"] = "localhost", "tls/ca.crt"
+	frpc["proxies"] = []any{obj{"name": "jellyfin", "type": "tcp", "localIP": "127.0.0.1", "localPort": mediaPort, "remotePort": mapping}}
+	homeCfg, err := homeStore.save(homeDraft, 0, obj{"uuid": homeUUID, "token": token})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,8 +245,8 @@ func TestFrontendRoutesBySNI(t *testing.T) {
 	f := newFixture(t, roleRelay)
 	certificate, _ := os.ReadFile(f.store.file("tls/proxy.crt"))
 	cfg := cloneObj(f.saved)
-	cfg["proxy"].(obj)["serverName"] = "localhost"
-	cfg["frp"].(obj)["controlPort"] = freePort(t)
+	section(cfg, "singBox", "inbound", "tls")["server_name"] = "localhost"
+	setBindPort(cfg, freePort(t))
 	saved, err := f.store.save(cfg, 1, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -254,8 +274,8 @@ func TestFrontendRoutesBySNI(t *testing.T) {
 	roots := x509.NewCertPool()
 	roots.AppendCertsFromPEM(certificate)
 	values, _ := f.store.secrets()
-	homeUUID := values[saved["proxy"].(obj)["homeCredentialRef"].(string)].(string)
-	controlPort, _ := port(saved["frp"].(obj)["controlPort"])
+	homeUUID := values[section(saved, "singBox", "inbound")["users"].([]any)[0].(obj)["uuid"].(string)].(string)
+	controlPort, _ := port(section(saved, "frps")["bindPort"])
 	home := newAppClient(t, obj{"type": "vless", "tag": "relay", "server": "127.0.0.1", "server_port": entryPort, "uuid": homeUUID,
 		"tls": obj{"enabled": true, "server_name": "localhost", "certificate": string(certificate)}})
 	if err = home.controlTLS(controlPort, roots); err != nil {

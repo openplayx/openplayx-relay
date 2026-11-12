@@ -36,13 +36,16 @@ sudo openplayx-relay status
 
 配对文件都包含凭据，须通过可信渠道分别传递：
 
-- 整个 `secrets/home/` 目录交给家庭端；其中只有 Home 配置、Home 专属机密、授权和 frps 公共证书，不包含 Relay 私钥或 App UUID。将目录放到家庭端私有持久目录后，通过 Home Web 表单修改家庭目标地址与端口。
-- `secrets/app-jellyfin.json` 导入 OpenPlayX“设置 → 远程访问”的来源连接表单（新来源仍兼容原配对入口）。默认 Jellyfin；Emby 修改对应逻辑端点；SMB 可设 `smb://nas.home.invalid/Media` 并在两端分配映射端口。
+- 整个 `secrets/home/` 目录交给家庭端；其中只有 Home 配置、Home 专属机密和 frps 公共证书，不包含 Relay 私钥或 App UUID。将目录放到家庭端私有持久目录后，在 Home Web 表单里编辑 `frpc.proxies`（家庭目标地址、端口与 `remotePort`）。
+- `secrets/app.json` 交给 App：一个 sing-box `outbound`（App user 的 UUID）加上可用的 `proxies: [{name, remotePort}]`。
 - `secrets/relay/` 目录及代理私钥只保留在 VPS；实际密钥位于该目录的 secrets.json 与 tls/ 资产中。
 
-默认映射 `jellyfin / 18096`，家庭服务地址 `192.168.50.10:8096` 只是待修改的示例。更多映射须同时修改 relay/home 的 services 和相应 App 配对；不重复或占用控制/代理端口。家庭 IP 只写入家庭配置，不写 App 的远程端点。
+配置分两层（字段沿用 sing-box / frp，详见 [docs/configuration.md](docs/configuration.md)）：
 
-`lineId`、`homeId`、`serviceId` 是稳定引用。更换 VPS/证书/协议时保留这些 ID 和已有来源 ID，只更新配对线路；不删除来源或重建媒体库。家庭端与 App 使用不同 UUID。当前一组 relay 配置服务一个家庭：App 可访问该家庭的所有已分配映射，home 仅可访问 frps 控制端口；多家庭应使用独立实例。frp token 不提供跨家庭的映射归属控制。
+- **网络层（sing-box）**：Relay 的 `singBox.inbound.users` 为每台 Home、每个 App 设备各分配一个 user；`singBox.route.rules` 用 `auth_user` + `port`/`port_range` 决定每个 user 能访问 Relay 回环上的哪些端口（Home 访问 `frps.bindPort`，App 访问映射端口），其余一律拒绝。
+- **注册层（frp）**：Home 的 `frpc.proxies` 声明要映射的服务及 `remotePort`；Relay 只用 `frps.allowPorts` 划定可注册的端口范围（默认 18000–18999），不需要预先知道服务列表。
+
+增加家庭服务时只改 Home 的 `frpc.proxies`（端口在 `allowPorts` 内）；增加 App 设备时在 Relay 添加 user 并加入相应 route rule，把该 user 的 outbound 交给设备。当前一组 Relay 配置服务一个家庭，frp token 不提供跨家庭的映射归属控制；多家庭应使用独立实例。
 
 ## 管理与回退
 
@@ -66,9 +69,9 @@ sudo openplayx-relay uninstall       # 删除 systemd 服务，保留配置与 r
 ./openplayx-relay render --config-dir /path/to/state --output generated   # 输出含凭据
 ```
 
-### 从 Python 版本迁移
+### 配置格式
 
-在已有部署上执行 `sudo ./openplayx-relay install` 即可：它停用旧的 `openplayx-relay-{manager,sing-box,frps}` 单元，复用原 `/var/lib/openplayx-relay` 中的 relay.json、secrets.json、admin.json、TLS 资产和 last-good.json（管理员密码保持有效），新服务启动后按最近一次成功应用的修订运行组件。新服务确认 active 后才删除旧单元文件；启动失败时重新启用旧单元。旧的 `/opt/openplayx-relay/releases/*` 不会自动删除。
+当前为 `schemaVersion: 2`（sing-box / frp 字段）。旧格式（`homeId`、`services`、`proxy`/`frp` 段）不再读取，也不提供自动导入；`install` 只替换二进制，不转换配置。
 
 部署拓扑和故障排查见 [docs/operations.md](docs/operations.md)。
 
@@ -78,4 +81,6 @@ sing-box 以 GPL-3.0-or-later 授权（另有命名限制），本程序静态�
 
 ## Web 配置管理
 
-类型化 Web 表单、管理员登录、草稿校验与测试、保存/应用分离、状态、脱敏导出和备份/损坏恢复。权威配置为 `relay.json`，实际 UUID/token 仅存于私有 `secrets.json`。旧 `deployment.json` 仅作为 `import-legacy` 的显式迁移输入。启动、迁移、权限与验证说明见 [docs/configuration.md](docs/configuration.md)。
+页面分为“传输链路”和“可用服务”两部分，默认展示已保存配置，展开对应区域可修改。Home 管理实际服务映射；Relay 管理允许注册的端口范围与身份访问权限。证书、日志和管理入口收在链路维护选项中。修改后在页面顶部保存，再应用已保存配置。
+
+类型化 Web 表单、管理员登录、草稿校验与测试、保存/应用分离、状态、脱敏导出和备份/损坏恢复。权威配置为 `relay.json`，实际 UUID/token 仅存于私有 `secrets.json`。配置结构（sing-box / frp 字段）、启动、权限与验证说明见 [docs/configuration.md](docs/configuration.md)。
