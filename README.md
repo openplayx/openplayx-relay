@@ -1,86 +1,189 @@
 # OpenPlayX Relay
 
-VPS 端服务：一个 Go 程序，内含 Web 配置管理、**sing-box 1.12.12**（VLESS + TLS 入口）和 **frps 0.65.0**。家庭端见 [openplayx-home](https://github.com/openplayx/openplayx-home)。App 无需安装外部代理客户端。不保证任意跨境网络的可用性。
+English | [简体中文](README.zh-CN.md)
 
-sing-box 与 frp 以 Go 库的形式编译进同一个二进制，版本固定在 `src/go.mod` / `src/go.sum`（模块校验和）中。运行时不需要 Python，也不再下载上游二进制。支持 Linux amd64/arm64 + systemd；本机端到端测试在 macOS arm64 完成。
+[![License: GPL v3+](https://img.shields.io/badge/license-GPLv3%2B-blue.svg)](COPYING)
 
-## 构建
+The VPS side of [OpenPlayX](https://github.com/openplayx/openplayx) remote
+access: one Go program with a web configuration manager, **sing-box 1.12.12**
+(VLESS + TLS ingress) and **frps 0.65.0**. The home side is
+[openplayx-home](https://github.com/openplayx/openplayx-home). The app reaches
+media services at home (Jellyfin, Emby, SMB, …) without installing an external
+proxy client.
 
-需要 Go 1.24+。Go 源码、模块文件和内嵌的 Web 页面（`src/web/`）都在 `src/` 下；除 `src/role.go` 外，Relay 与 Home 两个仓库的 `src/` 内容相同。
+```text
+App (embedded sing-box)
+  -> VPS VLESS/TLS ingress (TCP 443)
+  -> VPS 127.0.0.1:18096 (frps mapping)
+  -> frp tunnel (home sing-box -> VPS -> 127.0.0.1:7000)
+  -> home frpc -> NAS:8096
+```
+
+- **One binary**: sing-box and frp are compiled in as Go libraries, pinned in
+  `src/go.mod` / `src/go.sum` (module checksums). No Python at runtime, no
+  upstream binaries downloaded.
+- **Minimal exposure**: only TCP 443 (or the configured proxy port) is public;
+  the frps control port and media mappings listen on loopback. Each identity
+  can reach only the ports assigned to it; everything else is rejected.
+- **Web configuration**: typed forms, admin login, draft validation and
+  testing, separate save and apply, redacted export, backups and recovery from
+  damaged files.
+- **Built-in SNI routing**: the proxy and the HTTPS admin page can share public
+  port 443 without HAProxy or Caddy.
+- **Safe upgrades**: `update` restores the previous binary if the new one fails
+  to start; `rollback` switches back.
+
+Supports Linux amd64/arm64 with systemd; the end-to-end tests also run on
+macOS arm64. Availability over any particular network, including cross-border
+links, is not guaranteed.
+
+## Build
+
+Requires Go 1.24+. The Go sources, module files and the embedded web page
+(`src/web/`) are under `src/`; apart from `src/role.go`, `src/` is identical in
+the Relay and Home repositories.
 
 ```bash
 scripts/build.sh                       # dist/openplayx-relay-linux-{amd64,arm64} + SHA256SUMS
-scripts/build.sh darwin/arm64          # 其他平台
-(cd src && go test ./...)             # 单元测试 + 进程内端到端测试
+scripts/build.sh darwin/arm64          # other platforms
+(cd src && go test ./...)             # unit tests + in-process end-to-end tests
 ```
 
-## 配对与安装
+## Quick start: pair and install
 
-准备 VPS 域名和可验证的 TLS 证书。仅开放 TCP 443（或实际配置的代理端口）；7000、媒体映射端口保持回环监听。现有 443 服务须另行安排端口。需要用 `https://<公网IP>/` 直接打开管理页时，可启用内置的 SNI 分流，让代理与管理页共用 443，不需要 HAProxy 或 Caddy（见 [docs/configuration.md](docs/configuration.md)）。
+Prepare a domain for the VPS and a verifiable TLS certificate. Open only TCP
+443 (or the proxy port you configure); 7000 and the media mapping ports stay on
+loopback. An existing service on 443 needs another port. To open the admin page
+directly at `https://<public IP>/`, enable the built-in SNI routing so the proxy
+and the admin page share 443 (see [docs/configuration.md](docs/configuration.md), Chinese).
 
 ```bash
 ./openplayx-relay pair --host relay.example.com --tls-name relay.example.com \
   --certificate /etc/letsencrypt/live/relay.example.com/fullchain.pem \
   --key /etc/letsencrypt/live/relay.example.com/privkey.pem
-# 私有 CA：另加 --proxy-ca /path/to/ca.pem；不允许关闭证书校验。
-# 输出目录（默认 secrets/）已存在会拒绝执行，不隐式轮换密钥。
+# Private CA: add --proxy-ca /path/to/ca.pem; certificate verification cannot be turned off.
+# Refuses to run if the output directory (default secrets/) exists; keys are never rotated implicitly.
 
 sudo mkdir -p /var/lib/openplayx-relay
-sudo cp -a secrets/relay/. /var/lib/openplayx-relay/   # 已有目录时请勿覆盖
-sudo ./openplayx-relay install       # 安装二进制与 systemd 服务（管理页 + 组件）
-sudo openplayx-relay apply           # 应用配对生成的修订，启动 sing-box + frps
+sudo cp -a secrets/relay/. /var/lib/openplayx-relay/   # do not overwrite an existing directory
+sudo ./openplayx-relay install       # install the binary and the systemd service (admin page + components)
+sudo openplayx-relay apply           # apply the paired revision, start sing-box + frps
 sudo openplayx-relay status
 ```
 
-`install` 创建系统账户 `openplayx-relay`，把二进制复制到 `/opt/openplayx-relay/releases/<时间戳>/` 并切换 `current`，链接 `/usr/local/bin/openplayx-relay`，写入 `openplayx-relay.service`（单元参考 `deploy/openplayx-relay.service`），配置目录归该账户所有。服务以该账户运行，只授予绑定 443 所需的 `CAP_NET_BIND_SERVICE`。`apply` 把已保存修订应用到运行中的服务；也可在 Web 管理页中保存后点击“应用”。
+`install` creates the system account `openplayx-relay`, copies the binary to
+`/opt/openplayx-relay/releases/<timestamp>/` and switches `current`, links
+`/usr/local/bin/openplayx-relay`, and writes `openplayx-relay.service` (see
+`deploy/openplayx-relay.service`); the config directory belongs to that
+account. The service runs as that account with only `CAP_NET_BIND_SERVICE`, to
+bind 443. `apply` applies the saved revision to the running service; the web
+page's **Apply** button does the same after saving.
 
-配对文件都包含凭据，须通过可信渠道分别传递：
+All pairing files contain credentials. Hand each one over through a trusted
+channel:
 
-- 整个 `secrets/home/` 目录交给家庭端；其中只有 Home 配置、Home 专属机密和 frps 公共证书，不包含 Relay 私钥或 App UUID。将目录放到家庭端私有持久目录后，在 Home Web 表单里编辑 `frpc.proxies`（家庭目标地址、端口与 `remotePort`）。
-- `secrets/app.json` 交给 App：一个 sing-box `outbound`（App user 的 UUID）加上可用的 `proxies: [{name, remotePort}]`。
-- `secrets/relay/` 目录及代理私钥只保留在 VPS；实际密钥位于该目录的 secrets.json 与 tls/ 资产中。
+- The whole `secrets/home/` directory goes to the home side. It holds only the
+  Home configuration, Home-only secrets and the frps public certificate, no
+  Relay private keys and no app UUIDs. Put it into the home side's private
+  state directory, then edit `frpc.proxies` (home target address, port and
+  `remotePort`) in the Home web form.
+- `secrets/app.json` goes to the app: one sing-box `outbound` (the app user's
+  UUID) plus the usable `proxies: [{name, remotePort}]`.
+- `secrets/relay/` and the proxy private key stay on the VPS; the actual keys
+  are in that directory's secrets.json and tls/ assets.
 
-配置分两层（字段沿用 sing-box / frp，详见 [docs/configuration.md](docs/configuration.md)）：
+## Configuration model
 
-- **网络层（sing-box）**：Relay 的 `singBox.inbound.users` 为每台 Home、每个 App 设备各分配一个 user；`singBox.route.rules` 用 `auth_user` + `port`/`port_range` 决定每个 user 能访问 Relay 回环上的哪些端口（Home 访问 `frps.bindPort`，App 访问映射端口），其余一律拒绝。
-- **注册层（frp）**：Home 的 `frpc.proxies` 声明要映射的服务及 `remotePort`；Relay 只用 `frps.allowPorts` 划定可注册的端口范围（默认 18000–18999），不需要预先知道服务列表。
+Two layers, using sing-box / frp field names (details in
+[docs/configuration.md](docs/configuration.md), Chinese):
 
-增加家庭服务时只改 Home 的 `frpc.proxies`（端口在 `allowPorts` 内）；增加 App 设备时在 Relay 添加 user 并加入相应 route rule，把该 user 的 outbound 交给设备。当前一组 Relay 配置服务一个家庭，frp token 不提供跨家庭的映射归属控制；多家庭应使用独立实例。
+- **Network layer (sing-box)**: the Relay's `singBox.inbound.users` gives every
+  Home and every app device its own user; `singBox.route.rules` uses
+  `auth_user` + `port`/`port_range` to decide which loopback ports on the Relay
+  each user may reach (Home: `frps.bindPort`; apps: the mapping ports).
+  Everything else is rejected.
+- **Registration layer (frp)**: the Home's `frpc.proxies` declares the services
+  to map and their `remotePort`; the Relay only limits which ports may be
+  registered with `frps.allowPorts` (default 18000–18999) and does not need to
+  know the service list.
 
-## 管理与回退
+To add a home service, change only the Home's `frpc.proxies` (port inside
+`allowPorts`). To add an app device, add a user on the Relay with a matching
+route rule and give that user's outbound to the device. One Relay
+configuration serves one home: the frp token does not separate mappings
+between homes, so use separate instances for several homes.
+
+The current format is `schemaVersion: 2` (sing-box / frp fields). The old
+format (`homeId`, `services`, `proxy`/`frp` sections) is no longer read and not
+imported automatically; `install` only replaces the binary and does not
+convert configuration.
+
+## Web configuration
+
+The page has two parts, **transport link** and **available services**. It shows
+the saved configuration; expand a section to edit it. The Home manages the
+actual service mappings; the Relay manages the registrable port range and
+identity permissions. Certificates, logs and admin access are under the link
+maintenance options. Save at the top of the page, then apply the saved
+configuration.
+
+The authoritative configuration is `relay.json`; the real UUIDs and tokens are
+only in the private `secrets.json`. The admin page defaults to
+`http://127.0.0.1:9081`; open it locally or through an SSH port forward.
+Structure, startup, permissions and verification are described in
+[docs/configuration.md](docs/configuration.md) (Chinese).
+
+## Operations and rollback
 
 ```bash
 sudo systemctl stop|start|restart openplayx-relay
-sudo openplayx-relay status          # 期望/实际修订与组件状态
-sudo openplayx-relay check           # 用内置 sing-box/frps 校验已保存配置
-sudo ./openplayx-relay update        # 安装新构建的二进制；启动失败自动恢复原版本
-sudo openplayx-relay rollback        # 切回上一个已安装二进制
-sudo openplayx-relay uninstall       # 删除 systemd 服务，保留配置与 releases
+sudo openplayx-relay status          # desired/actual revision and component state
+sudo openplayx-relay check           # validate the saved configuration with the built-in sing-box/frps
+sudo ./openplayx-relay update        # install a newly built binary; restores the old one if startup fails
+sudo openplayx-relay rollback        # switch back to the previously installed binary
+sudo openplayx-relay uninstall       # remove the systemd service, keep configuration and releases
 ```
 
-`update` 与 `install` 相同：复制新二进制、切换 `current`、重启并确认服务处于 active，否则恢复原版本。`previous` 指向上一个成功版本，供 `rollback` 使用。上游升级需要修改 `src/go.mod` 后重新构建并审核，程序不会自行查询或下载新版本。配置的回退在 Web 管理页使用“恢复上一份配置”再应用。
+`update` works like `install`: copy the new binary, switch `current`, restart
+and confirm the service is active, otherwise restore the old version.
+`previous` points to the last good version for `rollback`. Upgrading upstream
+means changing `src/go.mod`, rebuilding and reviewing; the program never looks
+for or downloads new versions itself. To roll back configuration, use
+**restore previous configuration** on the web page and apply.
 
-证书续期后，在 Web 管理页导入新证书并应用；运行时直接读取配置目录 `tls/` 中的受控资产。
+After renewing a certificate, import it on the web page and apply; at runtime
+the program reads the managed assets in the config directory's `tls/`.
 
-不安装时可独立生成与检查配置：
+Generate and check configuration without installing:
 
 ```bash
 ./openplayx-relay check  --config-dir /path/to/state
-./openplayx-relay render --config-dir /path/to/state --output generated   # 输出含凭据
+./openplayx-relay render --config-dir /path/to/state --output generated   # output contains credentials
 ```
 
-### 配置格式
+Topology, troubleshooting and the limits of what the tests prove:
+[docs/operations.md](docs/operations.md) (Chinese).
 
-当前为 `schemaVersion: 2`（sing-box / frp 字段）。旧格式（`homeId`、`services`、`proxy`/`frp` 段）不再读取，也不提供自动导入；`install` 只替换二进制，不转换配置。
+## Contributing
 
-部署拓扑和故障排查见 [docs/operations.md](docs/operations.md)。
+Issues and pull requests are welcome, see [CONTRIBUTING.md](CONTRIBUTING.md).
+Report security problems privately as described in [SECURITY.md](SECURITY.md).
 
-## 上游与许可证
+## Disclaimer
 
-sing-box 以 GPL-3.0-or-later 授权（另有命名限制），本程序静态链接 sing-box，因此本仓库源码及分发的二进制整体按 **GPL-3.0-or-later** 提供，许可证全文见 [COPYING](COPYING)。frp 为 Apache-2.0。分发二进制时须同时提供对应源码（本仓库及 `src/go.sum` 锁定的模块版本）。上游源码：[sing-box v1.12.12](https://github.com/SagerNet/sing-box/tree/v1.12.12)、[frp v0.65.0](https://github.com/fatedier/frp/tree/v0.65.0)。配置字段以这些固定版本为准。
+This project is for reaching your own services at home. Follow your VPS
+provider's terms and the laws on networking and encrypted communication where
+you live. Availability on any network, including cross-border links, is not
+guaranteed.
 
-## Web 配置管理
+## Upstream and license
 
-页面分为“传输链路”和“可用服务”两部分，默认展示已保存配置，展开对应区域可修改。Home 管理实际服务映射；Relay 管理允许注册的端口范围与身份访问权限。证书、日志和管理入口收在链路维护选项中。修改后在页面顶部保存，再应用已保存配置。
-
-类型化 Web 表单、管理员登录、草稿校验与测试、保存/应用分离、状态、脱敏导出和备份/损坏恢复。权威配置为 `relay.json`，实际 UUID/token 仅存于私有 `secrets.json`。配置结构（sing-box / frp 字段）、启动、权限与验证说明见 [docs/configuration.md](docs/configuration.md)。
+sing-box is licensed under GPL-3.0-or-later (with additional naming
+restrictions). This program links sing-box statically, so the source in this
+repository and the distributed binaries are provided as a whole under
+**GPL-3.0-or-later**; the full text is in [COPYING](COPYING). frp is
+Apache-2.0. When distributing binaries, provide the corresponding source (this
+repository and the module versions locked in `src/go.sum`). Upstream sources:
+[sing-box v1.12.12](https://github.com/SagerNet/sing-box/tree/v1.12.12),
+[frp v0.65.0](https://github.com/fatedier/frp/tree/v0.65.0). Configuration
+fields follow these pinned versions.
