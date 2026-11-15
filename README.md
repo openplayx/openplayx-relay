@@ -55,7 +55,7 @@ Prepare a domain for the VPS and a verifiable TLS certificate. Open only TCP
 443 (or the proxy port you configure); 7000 and the media mapping ports stay on
 loopback. An existing service on 443 needs another port. To open the admin page
 directly at `https://<public IP>/`, enable the built-in SNI routing so the proxy
-and the admin page share 443 (see [docs/configuration.md](docs/configuration.md), Chinese).
+and the admin page share 443 (see [docs/configuration.md](docs/configuration.md)).
 
 ```bash
 ./openplayx-relay pair --host relay.example.com --tls-name relay.example.com \
@@ -95,7 +95,7 @@ channel:
 ## Configuration model
 
 Two layers, using sing-box / frp field names (details in
-[docs/configuration.md](docs/configuration.md), Chinese):
+[docs/configuration.md](docs/configuration.md)):
 
 - **Network layer (sing-box)**: the Relay's `singBox.inbound.users` gives every
   Home and every app device its own user; `singBox.route.rules` uses
@@ -131,7 +131,7 @@ The authoritative configuration is `relay.json`; the real UUIDs and tokens are
 only in the private `secrets.json`. The admin page defaults to
 `http://127.0.0.1:9081`; open it locally or through an SSH port forward.
 Structure, startup, permissions and verification are described in
-[docs/configuration.md](docs/configuration.md) (Chinese).
+[docs/configuration.md](docs/configuration.md).
 
 ## Operations and rollback
 
@@ -162,7 +162,7 @@ Generate and check configuration without installing:
 ```
 
 Topology, troubleshooting and the limits of what the tests prove:
-[docs/operations.md](docs/operations.md) (Chinese).
+[docs/operations.md](docs/operations.md).
 
 ## Contributing
 

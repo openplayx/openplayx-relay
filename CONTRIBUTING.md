@@ -27,7 +27,8 @@ Thanks for your interest. Bug reports, fixes and small improvements are welcome.
    `src/role.go`, both repositories must stay identical. Make the same change
    in both, and say so in the pull request.
 5. Update the README in both languages (`README.md` and `README.zh-CN.md`)
-   and `docs/` when behaviour, configuration or commands change.
+   and `docs/` (English and `*.zh-CN.md`) when behaviour, configuration or
+   commands change.
 6. Upgrading sing-box or frp means changing `src/go.mod` / `src/go.sum`,
    reviewing the upstream changes and running the end-to-end test; mention the
    upstream release notes in the pull request.

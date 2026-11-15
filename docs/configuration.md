@@ -1,26 +1,54 @@
-# Web 配置与权威 JSON
+# Web configuration and authoritative JSON
 
-同一个进程里有两层：Web 管理器管理本端逻辑配置；内置的 sing-box/frp 只按“最近一次成功应用”的修订运行。Web 页面不提供 shell、任意文件读写或原生 JSON 编辑器。
+English | [简体中文](configuration.zh-CN.md)
 
-## 文件与职责
+One process has two layers: the web manager manages this side's logical
+configuration, and the embedded sing-box/frp run only the most recently
+**successfully applied** revision. The web page offers no shell, no arbitrary
+file reads or writes and no raw JSON editor.
 
-- `relay.json` / `home.json`：本端唯一可编辑连接配置，含 `schemaVersion: 2` 和单调递增的 `revision`，结构见下文。
-- `secrets.json`：UUID、frp token 的实际值，普通配置只有 `secret:...` 引用。读取、状态和脱敏导出 API 不返回实际值。
-- `tls/`：受控证书与私钥资产；配置只保存相对受控目录的引用。Web 导入最多 128 KiB 的 PEM，服务端生成文件名，不接受浏览器提供的路径。运行时直接读取这里的文件。
-- `admin.json`：独立管理员密码的 scrypt 校验信息（与 Python 版本格式相同，迁移后密码继续有效）；管理员身份与 App、frpc 身份无关。
-- `bootstrap-token` / `bootstrap.json`：首次本机初始化的 15 分钟凭据与校验信息；设置管理员密码后删除。
-- `*.backup.json`：上一份已校验逻辑配置，不包含机密实际值。
-- `last-good.json`：最近一次成功应用的修订，服务启动时据此启动组件；`previous-good.json`：再上一份成功修订，其机密引用在回收时保留。
-- `status.json`：实际生效修订与失败状态；`runtime.json`：运行中的服务发布的组件状态，供 CLI `status`/`apply` 读取。
-- `revision.json`：已发放修订计数，保证显式损坏恢复也不复用旧修订。
+## Files and responsibilities
 
-持久目录默认 `/var/lib/openplayx-relay/` 或 `/var/lib/openplayx-home/`，目录 0700、配置/机密/资产 0600，归服务账户所有。以 root 执行修改配置的 CLI 命令后，程序会把目录内文件的属主恢复为该目录的属主。
+- `relay.json` / `home.json`: this side's only editable connection
+  configuration, with `schemaVersion: 2` and a monotonically increasing
+  `revision`; structure below.
+- `secrets.json`: the actual UUID and frp token values; the normal
+  configuration only holds `secret:...` references. Read, status and redacted
+  export APIs never return the actual values.
+- `tls/`: managed certificate and private key assets; the configuration stores
+  references relative to this managed directory. The web import accepts PEM up
+  to 128 KiB; the server chooses the file name and never accepts a path from the
+  browser. The runtime reads the files here directly.
+- `admin.json`: scrypt verifier of the separate admin password (same format as
+  the earlier Python version, so passwords keep working after migration). The
+  admin identity is unrelated to the app and frpc identities.
+- `bootstrap-token` / `bootstrap.json`: the 15-minute credential for the first
+  local setup and its verifier; deleted once an admin password is set.
+- `*.backup.json`: the previous validated logical configuration, without actual
+  secret values.
+- `last-good.json`: the most recently applied revision; the service starts
+  components from it. `previous-good.json`: the successful revision before
+  that; its secret references are kept during cleanup.
+- `status.json`: the revision actually in effect and failure state.
+  `runtime.json`: component state published by the running service, read by
+  the CLI `status`/`apply`.
+- `revision.json`: counter of issued revisions, so even an explicit recovery
+  from a damaged file never reuses an old revision.
 
-## 配置结构（沿用 sing-box / frp 字段）
+The state directory defaults to `/var/lib/openplayx-relay/` or
+`/var/lib/openplayx-home/`: directory 0700, configuration/secrets/assets 0600,
+owned by the service account. After CLI commands that change configuration run
+as root, the program restores the owner of the files to the directory's owner.
 
-配置分两层：**网络层用 sing-box，注册层用 frp**。字段名与上游一致，但只开放一个受控子集：类型、tag、回环监听、TLS 强制等固定值由后端校验，凭据字段（`uuid`、`token`）只保存 `secret:...` 引用。
+## Configuration structure (sing-box / frp fields)
 
-Relay `relay.json`：
+Two layers: **sing-box for the network layer, frp for the registration layer**.
+Field names match upstream, but only a controlled subset is available: types,
+tags, loopback listeners, enforced TLS and other fixed values are validated by
+the backend, and credential fields (`uuid`, `token`) only hold `secret:...`
+references.
+
+Relay `relay.json`:
 
 ```json
 {
@@ -46,11 +74,19 @@ Relay `relay.json`：
 }
 ```
 
-- `inbound.users`：每台 Home、每个 App 设备一个 user；删除 user 即吊销该身份，UUID 不可重复。
-- `route.rules`：只允许 `auth_user`、`port`、`port_range`。生成运行配置时每条规则限定目的地址 `127.0.0.1/32` 并路由到 direct，末尾追加 reject；端口只能是 `frps.bindPort` 或 `frps.allowPorts` 内的端口。修改 `bindPort` 时同时修改放行它的规则。
-- `frps`：固定只监听回环并强制 TLS；`allowPorts` 为 frp 原生格式（`{"single": n}` 或 `{"start": a, "end": b}`），限定 Home 可以注册的 `remotePort`。Relay 不需要预先知道服务列表。
+- `inbound.users`: one user per Home and per app device; deleting a user
+  revokes that identity. UUIDs must be unique.
+- `route.rules`: only `auth_user`, `port` and `port_range` are allowed. When the
+  runtime configuration is generated, every rule is limited to destination
+  `127.0.0.1/32` and routed to direct, and a final reject is appended. Ports can
+  only be `frps.bindPort` or ports inside `frps.allowPorts`. When you change
+  `bindPort`, change the rule that allows it too.
+- `frps`: always listens on loopback only and enforces TLS. `allowPorts` uses
+  frp's native format (`{"single": n}` or `{"start": a, "end": b}`) and limits
+  the `remotePort`s a Home may register. The Relay does not need to know the
+  service list in advance.
 
-Home `home.json`：
+Home `home.json`:
 
 ```json
 {
@@ -59,7 +95,7 @@ Home `home.json`：
     "inbound": { "type": "socks", "tag": "socks", "listen": "127.0.0.1", "listen_port": 1080 },
     "outbound": {
       "type": "vless", "tag": "relay", "server": "relay.example.com", "server_port": 443, "uuid": "secret:...",
-      "tls": { "enabled": true, "server_name": "relay.example.com", "certificate": "（可选 CA PEM）" }
+      "tls": { "enabled": true, "server_name": "relay.example.com", "certificate": "(optional CA PEM)" }
     }
   },
   "frpc": {
@@ -74,113 +110,235 @@ Home `home.json`：
 }
 ```
 
-- `singBox.outbound` 的 `uuid` 是 Relay 上某个 user 的 UUID；`inbound` 仅供 frpc 经 `transport.proxyURL` 使用。
-- `frpc.serverAddr` 固定 `127.0.0.1`：frpc 经 SOCKS → VLESS 到达 Relay 回环上的 frps，没有直连模式。
-- `frpc.proxies` 就是服务注册：当前只支持 `type: "tcp"`；`remotePort` 必须落在 Relay `frps.allowPorts` 内，否则 frps 拒绝。设置 `user` 后 frps 上的 proxy 名称为 `user.name`。
+- The `uuid` of `singBox.outbound` is the UUID of one user on the Relay;
+  `inbound` is used only by frpc through `transport.proxyURL`.
+- `frpc.serverAddr` is always `127.0.0.1`: frpc reaches frps on the Relay's
+  loopback through SOCKS → VLESS. There is no direct mode.
+- `frpc.proxies` is the service registration. Only `type: "tcp"` is supported;
+  `remotePort` must be inside the Relay's `frps.allowPorts`, otherwise frps
+  rejects it. With `user` set, the proxy name on frps is `user.name`.
 
-App 使用的文件（`pair` 生成 `app.json`）只有两部分：一个 sing-box `outbound`（含该 App user 的 UUID），以及它可以使用的 frpc proxy 子集 `proxies: [{ "name", "remotePort" }]`。
+The file for the app (`app.json`, generated by `pair`) has only two parts: one
+sing-box `outbound` (with that app user's UUID) and the subset of frpc proxies
+it may use, `proxies: [{ "name", "remotePort" }]`.
 
-Web 表单与 API 的机密更新键：Relay 为 `uuid:<user name>` 与 `token`，Home 为 `uuid` 与 `token`；留空表示保持，空字符串表示清除。
+Secret update keys in the web form and API: on the Relay `uuid:<user name>` and
+`token`, on the Home `uuid` and `token`. Leaving a field out keeps the value; an
+empty string clears it.
 
-## 初始化
+## Initial setup
 
-`schemaVersion: 1`（含 `homeId`、`services`、`grants.json` 的旧格式）不再读取，也不提供自动导入；旧部署需要按上面的结构重写配置并保留原 `secret:` 引用。
+`schemaVersion: 1` (the old format with `homeId`, `services` and
+`grants.json`) is no longer read and not imported automatically. Old
+deployments need their configuration rewritten in the structure above, keeping
+the existing `secret:` references.
 
-新部署用 Relay 的 `openplayx-relay pair` 一次生成分离的 `relay/`、`home/` 持久目录和 `app.json`。家庭端只接收 `home/`，它不包含 App UUID 或 Relay 私钥。`app.json` 包含实际客户端机密，应通过可信渠道传递，不能作为脱敏配置公开。
+New deployments use the Relay's `openplayx-relay pair` to generate separate
+`relay/` and `home/` state directories and `app.json` in one step. The home side
+receives only `home/`, which contains no app UUID and no Relay private key.
+`app.json` contains real client secrets: hand it over through a trusted channel
+and never publish it as a redacted configuration.
 
-## 运行与安装
+## Running and installing
 
-前台运行（调试或无 systemd 的环境）：
+Foreground (debugging, or environments without systemd):
 
 ```bash
 ./openplayx-relay serve --config-dir /path/to/private-state
 ```
 
-`serve` 同时提供管理页并运行组件：启动时若存在 `last-good.json` 就按该修订启动 sing-box/frps；配置无效或组件启动失败时管理页仍可用，状态中组件显示 `failed`。没有应用过任何修订时组件保持停止。
+`serve` provides the admin page and runs the components. On start, if
+`last-good.json` exists, it starts sing-box/frps from that revision. If the
+configuration is invalid or a component fails to start, the admin page stays
+available and the status shows the component as `failed`. Without any applied
+revision the components stay stopped.
 
-Linux/systemd 安装：
+Linux/systemd installation:
 
 ```bash
 sudo ./openplayx-relay install
 sudo systemctl status openplayx-relay
-sudo openplayx-relay uninstall      # 仅删除服务，保留持久配置与 releases
+sudo openplayx-relay uninstall      # removes only the service; keeps state and releases
 ```
 
-服务以专用账户 `openplayx-relay` 运行，使用 ProtectSystem=strict/ProtectHome 等限制，可写范围仅为持久目录，只保留 `CAP_NET_BIND_SERVICE`。API 不接受命令、可执行文件路径或任意目标文件路径。
+The service runs as the dedicated account `openplayx-relay` with restrictions
+such as ProtectSystem=strict/ProtectHome; it can only write to the state
+directory and keeps only `CAP_NET_BIND_SERVICE`. The API accepts no commands,
+executable paths or arbitrary target file paths.
 
-默认页面：Relay `http://127.0.0.1:9081`，Home `http://<Home局域网IP>:9080`（监听 0.0.0.0）。首次通过本机终端读取私有目录的 bootstrap-token 登录，15 分钟后过期。需要重新发放时执行 `sudo openplayx-relay renew-bootstrap`。初始化后请设置至少 16 字符的管理员密码。
+Default pages: Relay `http://127.0.0.1:9081`, Home `http://<home LAN IP>:9080`
+(listening on 0.0.0.0). For the first login, read the bootstrap-token from the
+private directory in a local terminal; it expires after 15 minutes. Run
+`sudo openplayx-relay renew-bootstrap` to issue a new one. After setup, set an
+admin password of at least 16 characters.
 
-Relay 推荐从本机或 SSH 端口转发访问；Home 默认在家庭局域网内通过 IP 直接访问。若转发到不同本地端口，需要确保浏览器 Host 位于管理配置允许的来源中；默认同号转发最简单。
+Open the Relay page locally or through an SSH port forward; the Home page is
+opened directly by IP inside the home network by default. If you forward to a
+different local port, the browser's Host must be among the origins the
+management configuration allows; forwarding to the same port number is
+simplest.
 
 ```bash
-# Relay 示例
+# Relay example
 ssh -L 9081:127.0.0.1:9081 user@relay.example.com
 ```
 
-### 与代理共用公网 443（内置 SNI 分流）
+### Sharing public port 443 with the proxy (built-in SNI routing)
 
-Relay 可以自己监听公网 443，同时服务 App/Home 的代理连接和 Web 管理页，不需要 HAProxy、Caddy 等外部程序。程序只读取 TLS ClientHello 中的 SNI，不解密内容：
+The Relay can listen on public 443 itself and serve both the app/Home proxy
+connections and the web admin page, without external programs such as HAProxy
+or Caddy. It reads only the SNI in the TLS ClientHello and decrypts nothing:
 
-- SNI 等于**当前已应用修订**的 `singBox.inbound.tls.server_name`：字节原样转发到回环上的 sing-box（`singBox.inbound.listen:listen_port`），TLS 由 sing-box 终止，App/Home outbound 的地址、端口、UUID 和证书保持原值。sing-box 未运行时连接被关闭。
-- 其他 TLS 连接（例如浏览器直接访问 `https://<公网IP>/`）：在进程内交给 HTTPS 管理页，管理页看到的是真实来源地址，登录限流按来源分别计算。
-- 非 TLS 或 5 秒内未完成 ClientHello 的连接直接关闭；未完成握手的连接数有上限。
+- SNI equal to `singBox.inbound.tls.server_name` of the **currently applied
+  revision**: the bytes are forwarded unchanged to sing-box on loopback
+  (`singBox.inbound.listen:listen_port`), sing-box terminates TLS, and the
+  app/Home outbounds keep their address, port, UUID and certificate. If sing-box
+  is not running, the connection is closed.
+- Any other TLS connection (for example a browser opening `https://<public IP>/`)
+  is handed in-process to the HTTPS admin page, which sees the real client
+  address, so login rate limits apply per client.
+- Non-TLS connections, or connections without a complete ClientHello within 5
+  seconds, are closed; the number of unfinished handshakes is capped.
 
-在 `relay.json` 的 `management` 中增加可选的 `frontend`（管理页“公网 TLS 入口 IP/端口”字段）：
+Add the optional `frontend` to `management` in `relay.json` (the admin page's
+"public TLS entry IP/port" fields):
 
 ```json
 "singBox": { "inbound": { "listen": "127.0.0.1", "listen_port": 443, "tls": { "server_name": "relay.example.com", "...": "..." }, "...": "..." }, "...": "..." },
 "management": {
   "listen": "127.0.0.1", "port": 9081, "https": true,
-  "certificateFile": "tls/<管理证书>.crt", "keyFile": "tls/<管理私钥>.key",
+  "certificateFile": "tls/<admin certificate>.crt", "keyFile": "tls/<admin key>.key",
   "allowedHosts": ["localhost", "127.0.0.1", "203.0.113.10"],
   "frontend": { "listen": "203.0.113.10", "port": 443 }
 }
 ```
 
-约束（后端校验）：
+Constraints (validated by the backend):
 
-- `frontend.listen` 是本机实际公网 IP（不能是回环；`0.0.0.0` 会与回环上的 sing-box 冲突而被拒绝）。`frontend.port` 必须等于 `singBox.inbound.listen_port`，因为 Home 与 App outbound 的 `server_port` 就是它。
-- `singBox.inbound.listen` 必须是回环地址；管理页必须开启 HTTPS 并配置受控证书；必须先设置管理员密码。`allowedHosts` 加入公网 IP 或域名，管理证书 SAN 需包含它，自签名证书需要浏览器显式信任。
-- 不能与 inbound、管理页、frps `bindPort` 或 `allowPorts` 的监听冲突。管理页本身仍在回环端口（例如 9081）上，可以继续用 SSH 转发访问。
+- `frontend.listen` is the machine's actual public IP (not loopback; `0.0.0.0`
+  would conflict with sing-box on loopback and is rejected). `frontend.port`
+  must equal `singBox.inbound.listen_port`, because that is the `server_port`
+  of the Home and app outbounds.
+- `singBox.inbound.listen` must be a loopback address; the admin page must use
+  HTTPS with a managed certificate; an admin password must be set.
+  `allowedHosts` must include the public IP or domain, the admin certificate's
+  SAN must contain it, and a self-signed certificate must be trusted
+  explicitly in the browser.
+- It must not conflict with the inbound, the admin page, frps `bindPort` or
+  `allowPorts` listeners. The admin page itself stays on its loopback port
+  (for example 9081) and remains reachable through SSH forwarding.
 
-`frontend` 属于管理入口：保存后执行 `systemctl restart openplayx-relay` 才生效（组件按已应用修订一并重启，会短暂中断播放）。更改 `singBox.inbound.tls.server_name` 后，分流按新应用的修订自动生效。验证公网页面、未认证 API 的 401、登录和 Home 隧道恢复后，删除主机防火墙中不再需要的 `9081/tcp` 放行规则。
+`frontend` belongs to the management entry: after saving, run
+`systemctl restart openplayx-relay` for it to take effect (components restart
+with the applied revision, which briefly interrupts playback). After changing
+`singBox.inbound.tls.server_name`, routing follows the newly applied revision
+automatically. Once the public page, 401 for unauthenticated API calls, login
+and the Home tunnel are verified, remove the host firewall rule for `9081/tcp`
+if it is no longer needed.
 
-此前使用 HAProxy 的部署（sing-box `127.0.0.1:443`、管理页 `127.0.0.2:443`）仍可继续运行。改用内置分流时：保存带 `frontend` 的修订，`systemctl disable --now haproxy`，再重启 `openplayx-relay`（内置入口要绑定 HAProxy 原来占用的公网 443）。
+Deployments that used HAProxy before (sing-box on `127.0.0.1:443`, admin page
+on `127.0.0.2:443`) keep working. To switch to the built-in routing: save a
+revision with `frontend`, run `systemctl disable --now haproxy`, then restart
+`openplayx-relay` (the built-in entry needs the public 443 that HAProxy held).
 
-Home 默认允许局域网 IP 直连，仍需管理员密码或短期初始化凭据；只接受回环/家庭私有网段请求。实际到达本机接口的字面 IP 自动允许，其他主机名仍须列在 allowedHosts。Home 写请求的 Origin 必须与当前 Host 精确一致。Relay 非回环管理仍必须配置 HTTPS 和管理员密码。修改管理监听后，页面只保存；在本机重启服务（`systemctl restart openplayx-relay`，组件按已应用修订一并重启，会短暂中断播放）后再应用组件配置，避免页面把旧监听状态误报成已生效。
+The Home allows direct LAN IP access by default, still requiring the admin
+password or the short-lived bootstrap credential, and accepts only requests
+from loopback or private home networks. Literal IPs that actually reach a local
+interface are allowed automatically; other host names must be listed in
+allowedHosts. Home write requests must have an Origin that exactly matches the
+current Host. Non-loopback Relay management still requires HTTPS and an admin
+password. After changing the management listener, the page only saves it;
+restart the service locally (`systemctl restart openplayx-relay`; components
+restart with the applied revision, which briefly interrupts playback) before
+applying component configuration, so the page does not report the old listener
+as in effect.
 
-## 使用流程
+## Workflow
 
-1. 编辑类型化表单；机密留空表示保持，明确清除后若仍有必需依赖则后端拒绝保存。
-2. 校验草稿：服务端检查版本、端口、重复服务、授权、凭据引用和 TLS 路径，不依赖前端校验。
-3. 测试草稿：在内存中生成运行配置，执行与 `sing-box check`、`frps verify`/`frpc verify` 相同的内置校验并加载 TLS 资产；Home 另外测试已配置 Relay 的 TCP 可达性。不重启线上组件、不写权威配置，不承诺媒体登录或隧道已经成功。
-4. 保存 JSON：携带 expectedRevision；并发修改返回 409。机密先写入，普通 JSON 通过同目录临时文件、fsync 和原子替换保存。保存不会等同于应用。
-5. 应用已保存修订：先校验，再在进程内停止旧组件、按 sing-box → frps/frpc 顺序启动新组件。Home 确认 SOCKS5 握手就绪后才启动 frpc，frpc 只经该 SOCKS 连接，不存在直连回退。
-6. 失败保留已保存期望修订，显示“已保存但未生效”，并用 `last-good.json` 重新启动上一份运行配置（没有时停止组件）；成功才更新实际修订并清理不再被当前、备份、最近及上一份成功配置引用的机密。
+1. Edit the typed form. Leaving a secret empty keeps it; if a secret is cleared
+   explicitly while something still depends on it, the backend refuses to save.
+2. Validate the draft: the server checks version, ports, duplicate services,
+   permissions, credential references and TLS paths, independent of the
+   frontend's checks.
+3. Test the draft: generate the runtime configuration in memory, run the same
+   built-in checks as `sing-box check` and `frps verify`/`frpc verify`, and load
+   the TLS assets; the Home also tests TCP reachability of the configured Relay.
+   This restarts no live components, writes no authoritative configuration and
+   does not promise that media login or the tunnel already works.
+4. Save the JSON with expectedRevision; concurrent changes return 409. Secrets
+   are written first; the normal JSON is saved through a temporary file in the
+   same directory, fsync and atomic replace. Saving is not applying.
+5. Apply the saved revision: validate first, then stop the old components
+   in-process and start the new ones in the order sing-box → frps/frpc. The
+   Home starts frpc only after the SOCKS5 handshake is ready; frpc connects only
+   through that SOCKS proxy and never falls back to a direct connection.
+6. On failure, the saved desired revision is kept, the page shows "saved but
+   not in effect", and the previous runtime configuration from
+   `last-good.json` is restarted (or the components are stopped if there is
+   none). Only on success is the actual revision updated and secrets no longer
+   referenced by the current, backup, last-good and previous-good
+   configurations cleaned up.
 
-CLI `apply` 对已安装的 systemd 服务执行同样的流程：写入 `last-good.json`、重启服务，并等待服务在 `runtime.json` 中报告该修订的组件均为 active；失败时恢复上一份并报告 applyFailed。
+The CLI `apply` runs the same flow against the installed systemd service: it
+writes `last-good.json`, restarts the service and waits until the service
+reports, in `runtime.json`, that all components of that revision are active.
+On failure it restores the previous one and reports applyFailed.
 
-配置与应用修改可能影响活动播放；页面应用前会明确提示。只更新本端，不能声称另一台机器已被一并更新。
+Configuration and apply changes may affect active playback; the page warns
+before applying. Only this side is updated; never claim that the other machine
+was updated too.
 
-普通“恢复上一份配置”也保存为新修订，仍需应用。损坏或未知 schema 不会被默认值覆盖；启动遇到无法读取或不安全的管理配置时仅使用固定回环恢复入口，仍要求管理员认证，且不改写原文件。认证后可选择显式恢复最近已知备份，先以文件哈希检查并发修改，再将原始字节另存为 damaged 文件，生成高于已发放计数的新修订。
+A normal "restore previous configuration" is also saved as a new revision and
+still needs to be applied. Damaged files or unknown schemas are never
+overwritten with defaults. If the management configuration cannot be read or is
+unsafe at startup, only the fixed loopback recovery entry is used, still
+requiring admin authentication, and the original file is not rewritten. After
+authenticating you can explicitly restore the last known backup: concurrent
+changes are checked by file hash first, the original bytes are saved as a
+damaged file, and a new revision above the issued counter is created.
 
-## API 与安全边界
+## API and security boundaries
 
-- 管理 API 使用 HttpOnly + SameSite=Strict 会话 cookie，30 分钟过期；HTTPS 时附带 Secure。
-- 修改接口要求登录会话、独立 CSRF token、JSON 请求、明确 Content-Length 和精确 Origin/Host 匹配；不开放 CORS。静态登录页允许正常跨页面导航，不暴露任何配置。
-- 登录有尝试频率限制；请求体、TLS 资产数量与并发连接（32）有上限。日志不记录请求 URL、表单或机密；组件错误写入日志前会去除已知机密值。
-- 只提供三个内嵌的 Web 静态资源，没有私钥下载或任意文件 API。
-- `GET /api/config`、`/api/status`、`/api/export`；`POST /api/validate`、`/api/test`、`/api/save`、`/api/apply`、`/api/restore`；显式损坏恢复使用 `/api/recovery` 与 `/api/recover`。所有配置/状态接口均需认证。
-- 管理监听变化需要本机重启服务；管理器没有停止/重启自身或系统其他服务的 Web API。
+- The management API uses an HttpOnly + SameSite=Strict session cookie that
+  expires after 30 minutes; Secure is added over HTTPS.
+- Changes require a login session, a separate CSRF token, a JSON request, an
+  explicit Content-Length and an exact Origin/Host match. CORS is not offered.
+  The static login page allows normal cross-page navigation and exposes no
+  configuration.
+- Login attempts are rate limited; request bodies, the number of TLS assets and
+  concurrent connections (32) are capped. Logs record no request URLs, forms or
+  secrets; component errors have known secret values removed before logging.
+- Only three embedded static web resources are served. There is no private key
+  download and no arbitrary file API.
+- `GET /api/config`, `/api/status`, `/api/export`; `POST /api/validate`,
+  `/api/test`, `/api/save`, `/api/apply`, `/api/restore`; explicit recovery
+  from damaged files uses `/api/recovery` and `/api/recover`. All
+  configuration and status endpoints require authentication.
+- Changes to the management listener need a local service restart; the manager
+  has no web API to stop or restart itself or any other system service.
 
-frp token 由所有 Home 共享，不提供跨家庭的映射归属控制；多家庭应使用独立实例。当前生成器支持固定版本 VLESS/TLS；新增代理协议需要增加后端 schema、生成器和真实验证，不能在表单中伪装为已经支持。
+The frp token is shared by all Homes and does not separate mappings between
+homes; use separate instances for several homes. The generator currently
+supports the pinned VLESS/TLS version; a new proxy protocol needs backend schema,
+generator and real verification work, and must not be presented in the form as
+already supported.
 
-## 验证
+## Verification
 
 ```bash
 cd src && go test ./...
 ```
 
-测试覆盖机密不出现在普通 JSON/API、修订冲突、备份恢复、未知/损坏文件保护、哈希恢复、端口/路径/授权拒绝、登录/CSRF/跨域限制、应用失败回退、配对输出，以及在同一进程中以 Relay 与 Home 两个角色运行真实 sing-box/frp 的媒体链路（`TestEndToEnd`，`go test -short` 跳过）。
+The tests cover: secrets never appearing in normal JSON or APIs, revision
+conflicts, backup restore, protection of unknown/damaged files, hash-checked
+recovery, rejection of bad ports/paths/permissions, login/CSRF/cross-origin
+limits, rollback after a failed apply, pairing output, and a media link with
+real sing-box/frp running as both Relay and Home in one process
+(`TestEndToEnd`, skipped with `go test -short`).
 
-已有 Home 回环配置可使用 `sudo ./openplayx-home install --enable-lan`（或已安装后 `sudo openplayx-home enable-lan` 再重启服务），显式保存新修订。该选项仅作用于 Home；Relay 默认回环保持不变。主机防火墙仅放行家庭网段的 TCP 9080，不做路由器公网端口映射。
+An existing Home loopback configuration can be switched with
+`sudo ./openplayx-home install --enable-lan` (or, once installed,
+`sudo openplayx-home enable-lan` followed by a service restart), which saves a
+new revision explicitly. The option applies only to the Home; the Relay keeps
+its loopback default. The host firewall should allow TCP 9080 only from the
+home network; do not forward the port on the router.

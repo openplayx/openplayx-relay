@@ -34,7 +34,7 @@ scripts/build.sh darwin/arm64          # 其他平台
 
 ## 快速开始：配对与安装
 
-准备 VPS 域名和可验证的 TLS 证书。仅开放 TCP 443（或实际配置的代理端口）；7000 和媒体映射端口保持回环监听。现有 443 服务须另行安排端口。需要用 `https://<公网IP>/` 直接打开管理页时，可启用内置的 SNI 分流，让代理与管理页共用 443（见 [docs/configuration.md](docs/configuration.md)）。
+准备 VPS 域名和可验证的 TLS 证书。仅开放 TCP 443（或实际配置的代理端口）；7000 和媒体映射端口保持回环监听。现有 443 服务须另行安排端口。需要用 `https://<公网IP>/` 直接打开管理页时，可启用内置的 SNI 分流，让代理与管理页共用 443（见 [docs/configuration.zh-CN.md](docs/configuration.zh-CN.md)）。
 
 ```bash
 ./openplayx-relay pair --host relay.example.com --tls-name relay.example.com \
@@ -60,7 +60,7 @@ sudo openplayx-relay status
 
 ## 配置模型
 
-配置分两层（字段沿用 sing-box / frp，详见 [docs/configuration.md](docs/configuration.md)）：
+配置分两层（字段沿用 sing-box / frp，详见 [docs/configuration.zh-CN.md](docs/configuration.zh-CN.md)）：
 
 - **网络层（sing-box）**：Relay 的 `singBox.inbound.users` 为每台 Home、每个 App 设备各分配一个 user；`singBox.route.rules` 用 `auth_user` + `port`/`port_range` 决定每个 user 能访问 Relay 回环上的哪些端口（Home 访问 `frps.bindPort`，App 访问映射端口），其余一律拒绝。
 - **注册层（frp）**：Home 的 `frpc.proxies` 声明要映射的服务及 `remotePort`；Relay 只用 `frps.allowPorts` 划定可注册的端口范围（默认 18000–18999），不需要预先知道服务列表。
@@ -73,7 +73,7 @@ sudo openplayx-relay status
 
 页面分为“传输链路”和“可用服务”两部分，默认展示已保存配置，展开对应区域可修改。Home 管理实际服务映射；Relay 管理允许注册的端口范围与身份访问权限。证书、日志和管理入口收在链路维护选项中。修改后在页面顶部保存，再应用已保存配置。
 
-权威配置为 `relay.json`，实际 UUID/token 仅存于私有 `secrets.json`。默认管理页为 `http://127.0.0.1:9081`，推荐从本机或 SSH 端口转发访问。配置结构、启动、权限与验证说明见 [docs/configuration.md](docs/configuration.md)。
+权威配置为 `relay.json`，实际 UUID/token 仅存于私有 `secrets.json`。默认管理页为 `http://127.0.0.1:9081`，推荐从本机或 SSH 端口转发访问。配置结构、启动、权限与验证说明见 [docs/configuration.zh-CN.md](docs/configuration.zh-CN.md)。
 
 ## 管理与回退
 
@@ -97,7 +97,7 @@ sudo openplayx-relay uninstall       # 删除 systemd 服务，保留配置与 r
 ./openplayx-relay render --config-dir /path/to/state --output generated   # 输出含凭据
 ```
 
-部署拓扑、故障排查和验证边界见 [docs/operations.md](docs/operations.md)。
+部署拓扑、故障排查和验证边界见 [docs/operations.zh-CN.md](docs/operations.zh-CN.md)。
 
 ## 参与贡献
 
