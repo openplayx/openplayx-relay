@@ -6,9 +6,9 @@
 openplayx-relay managed --config /var/lib/openplayx-relay-managed/managed.json
 ```
 
-配置由 API 的 Vultr 初始化流程安全写入，包含 apiOrigin、nodeId、machineToken、host、certificate、key、releaseTag、releaseCommit、binaryVersion。文件仅服务用户可读。程序校验 HTTPS 中心地址、固定节点身份、受支持的配置 schema、单调递增 revision、最长 30 分钟有效期及自身 binaryVersion。
+配置由 API 的 Vultr 初始化流程安全写入，包含 apiOrigin、nodeId、machineToken、host、certificate、key、releaseTag、releaseCommit、binaryVersion。文件仅服务用户可读。程序校验 HTTPS 中心地址、固定节点身份、受支持的配置 schema、单调递增 revision及自身 binaryVersion。
 
-托管节点每 20 秒获取中心 `/v1/relay/node/config`。首次启动无本地缓存授权；更新时先关闭旧连接，再应用身份/端口规则，成功后 ACK。独立租约监视器每秒检查一次，到期关闭 sing-box/frps，不会因网络请求卡住而继续使用过期权限。无效配置不会复活旧策略。
+托管节点每 20 秒获取中心 `/v1/relay/node/config`，继续同步账号/服务权限。首次启动无本地缓存授权。相同权限内容即使全局 revision 或时间戳变化，也不重启转发进程；权限实际变化仍需关闭旧运行实例并重载，已有连接会中断，尚非无损热更新。应用成功后 ACK。移除配置过期自动停服，API 断连或无效/倒退更新时保留上次成功配置，不因刷新时间戳过期停服。
 
 ## 身份与注册隔离
 
@@ -16,7 +16,7 @@ VLESS 入口按 Connector/设备的独立 UUID 认证，只允许访问该身份
 
 frp 的原生 Token 同时用于认证和控制流加密，不能只在登录插件中替换成共享 Token。因此托管模式在同一进程内为各 Connector 启动独立的回环 frps，使用该 Connector 的原生凭据；sing-box 按已验证的 Connector 身份将逻辑 7000 端口转向对应回环监听。原始 frps 端口不暴露给客户端。插件再次校验 Connector 身份、时间凭据和 TCP remotePort 归属，阻止跨 Connector 注册。
 
-当前实现身份/端口授权、配置应用/撤销及租约失效关闭；userPolicies 中的带宽与连接数配额尚未接入专门的运行时限速器，不能作为精确流量计费或硬配额承诺。
+当前实现身份/端口授权、配置应用/撤销及保留上次成功策略；userPolicies 中的带宽与连接数配额尚未接入专门的运行时限速器，不能作为精确流量计费或硬配额承诺。
 
 ## TLS 与健康检查
 
@@ -26,7 +26,7 @@ frp 的原生 Token 同时用于认证和控制流加密，不能只在登录插
 
 ## 发布与联调
 
-先运行 `go vet ./...`、`go test ./...`；托管测试含真实 VLESS → frps → Connector → HTTP 媒体访问、未授权端口拒绝及租约失效关闭。还可使用 `go test -race -run Managed ./...` 检查并发。
+先运行 `go vet ./...`、`go test ./...`；托管测试含真实 VLESS → frps → Connector → HTTP 媒体访问、未授权端口拒绝及刷新/异常情况下保持转发。还可使用 `go test -race -run Managed ./...` 检查并发。
 
 通过现有构建脚本/CI 发布 amd64 Linux 产物，在 API 中配置固定发布 tag、commit、下载 URL、SHA256 和 binaryVersion。Jenkins 的产物版本一般去掉 tag 的 v 前缀；两者分别记录，不要随意改为 latest。兼容原始二进制或已有 tar.gz 发布包。
 
@@ -35,3 +35,5 @@ frp 的原生 Token 同时用于认证和控制流加密，不能只在登录插
 ### 并发检查的已知限制
 
 自有策略/插件/配置同步可以独立运行 `go test -race -run '^TestManaged(Policy|FRPPlugin|Sync)' ./...`。完整媒体链路的 race 检查会触发固定 frp v0.65.0 上游的 client/proxy wrapper.Stop 与 health callback、server/control worker 与 RegisterWorkConn 的 channel close/send 竞态；本次没有修改或升级上游库，不能将完整 race 检查列为通过。常规真实链路测试通过。
+
+手机端根据 TCP/TLS 测试结果主动选择并固定节点，后台刷新不自动切换。取消过期停服后，托管节点服务端口必须等撤销 ACK 或 Vultr 实例销毁确认才允许回收；节点退休或等待超时本身不代表旧策略已停止。

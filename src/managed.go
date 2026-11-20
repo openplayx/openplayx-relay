@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
 	"encoding/hex"
@@ -86,7 +87,7 @@ type managedAgent struct {
 	config          managedConfig
 	runtime         *Runtime
 	revision        string
-	validUntil      time.Time
+	policyHash      [32]byte
 	identities      map[string]managedIdentity
 	serverToken     string
 	client          *http.Client
@@ -117,7 +118,7 @@ func (m *managedAgent) credential(p managedProfile, ref, kind string) (string, e
 	return c.Value, nil
 }
 func (m *managedAgent) plan(p managedProfile) (*Plan, map[string]managedIdentity, error) {
-	if p.SchemaVersion != 1 || p.Node.NodeID != m.config.NodeID || p.Node.Host != m.config.Host || p.Node.ControlPort != 7000 || !p.ValidUntil.After(time.Now()) || p.ValidUntil.After(time.Now().Add(31*time.Minute)) {
+	if p.SchemaVersion != 1 || p.Node.NodeID != m.config.NodeID || p.Node.Host != m.config.Host || p.Node.ControlPort != 7000 {
 		return nil, nil, errors.New("invalid managed profile envelope")
 	}
 	if _, err := strconv.ParseUint(p.Revision, 10, 64); err != nil {
@@ -268,10 +269,6 @@ func (m *managedAgent) plugin(w http.ResponseWriter, r *http.Request) {
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	if !m.validUntil.After(time.Now()) {
-		reject()
-		return
-	}
 	expected := strings.TrimPrefix(r.URL.Path, "/authorize/")
 	verify := func(user, key string, stamp int64) bool {
 		i, ok := m.identities[user]
@@ -321,11 +318,11 @@ func (m *managedAgent) health(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	m.mu.RLock()
-	revision, valid, nodeState, acked := m.revision, m.validUntil.After(time.Now()), m.nodeState, m.ackedRevision
+	revision, nodeState, acked := m.revision, m.nodeState, m.ackedRevision
 	m.mu.RUnlock()
 	components := m.runtime.Components()
 	status := "inactive"
-	if valid && revision == acked && components["sing-box"] == "active" && components["frps"] == "active" {
+	if revision != "" && revision == acked && components["sing-box"] == "active" && components["frps"] == "active" {
 		status = "active"
 	} else {
 		w.WriteHeader(503)
@@ -364,30 +361,33 @@ func (m *managedAgent) sync(ctx context.Context) error {
 	}
 	plan, identities, err := m.plan(p)
 	if err != nil {
-		m.mu.Lock()
-		m.revision = ""
-		m.mu.Unlock()
-		_ = m.runtime.Stop()
+		// A rejected update never tears down the last successfully applied policy.
 		return err
 	}
 	incoming, _ := strconv.ParseUint(p.Revision, 10, 64)
 	m.mu.Lock()
 	if incoming < m.highestRevision {
-		m.revision = ""
 		m.mu.Unlock()
-		_ = m.runtime.Stop()
 		return errors.New("managed configuration revision moved backwards")
 	}
 	m.highestRevision = incoming
 	m.mu.Unlock()
+	// Global revisions and freshness timestamps can change without changing
+	// this node's authorization. Do not restart working connections for that.
+	policy, _ := json.Marshal(struct {
+		Policies    []managedPolicy
+		Credentials map[string]managedCredential
+	}{p.Policies, p.Credentials})
+	hash := sha256.Sum256(policy)
 	m.mu.RLock()
-	same := m.revision == p.Revision && m.validUntil.After(time.Now())
+	same := m.revision != "" && m.policyHash == hash
 	m.mu.RUnlock()
+	components := m.runtime.Components()
+	same = same && components["sing-box"] == "active" && components["frps"] == "active"
 	if !same {
 		_ = m.runtime.Stop()
 		m.mu.Lock()
 		m.identities = identities
-		m.validUntil = p.ValidUntil
 		m.revision = ""
 		m.mu.Unlock()
 		if err = m.runtime.Restart(nil, plan); err != nil {
@@ -397,7 +397,7 @@ func (m *managedAgent) sync(ctx context.Context) error {
 	m.mu.Lock()
 	m.revision = p.Revision
 	m.nodeState = p.Node.Status
-	m.validUntil = p.ValidUntil
+	m.policyHash = hash
 	m.mu.Unlock()
 	ack, err := m.request(ctx, "/v1/relay/node/config-acks", obj{"revision": p.Revision, "status": "applied"})
 	if err != nil {
@@ -411,14 +411,6 @@ func (m *managedAgent) sync(ctx context.Context) error {
 	m.ackedRevision = p.Revision
 	m.mu.Unlock()
 	return nil
-}
-func (m *managedAgent) expire() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if !m.validUntil.After(time.Now()) {
-		_ = m.runtime.Stop()
-		m.revision = ""
-	}
 }
 func cmdManaged(args []string) error {
 	flags := flag.NewFlagSet("managed", flag.ContinueOnError)
@@ -475,18 +467,7 @@ func cmdManaged(args []string) error {
 	defer a.runtime.Stop()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	go func() {
-		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				a.expire()
-			}
-		}
-	}()
+
 	for {
 		if err = a.sync(ctx); err != nil {
 			fmt.Fprintln(os.Stderr, "managed Relay: configuration not applied; waiting for retry")

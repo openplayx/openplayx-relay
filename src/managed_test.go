@@ -55,7 +55,7 @@ func TestManagedPolicyIsolationAndFailClosedEnvelopes(t *testing.T) {
 		t.Fatal("missing default deny")
 	}
 	original, _ := json.Marshal(p)
-	cases := []func(*managedProfile){func(v *managedProfile) { v.ValidUntil = time.Now().Add(-time.Second) }, func(v *managedProfile) { v.Node.NodeID = "other" }, func(v *managedProfile) { v.Node.Status = "retired" }, func(v *managedProfile) { v.Node.Status = "disabled" }, func(v *managedProfile) { v.Policies[0].Devices[0].Allowed = []string{"other_user_service"} }, func(v *managedProfile) { v.Policies[0].Services[0].ConnectorID = "other_connector" }, func(v *managedProfile) { v.Policies[0].Services[0].RemotePort = 7000 }, func(v *managedProfile) { v.Credentials["device_proxy"] = v.Credentials["connector_proxy"] }}
+	cases := []func(*managedProfile){func(v *managedProfile) { v.Node.NodeID = "other" }, func(v *managedProfile) { v.Node.Status = "retired" }, func(v *managedProfile) { v.Node.Status = "disabled" }, func(v *managedProfile) { v.Policies[0].Devices[0].Allowed = []string{"other_user_service"} }, func(v *managedProfile) { v.Policies[0].Services[0].ConnectorID = "other_connector" }, func(v *managedProfile) { v.Policies[0].Services[0].RemotePort = 7000 }, func(v *managedProfile) { v.Credentials["device_proxy"] = v.Credentials["connector_proxy"] }}
 	for index, change := range cases {
 		var changed managedProfile
 		_ = json.Unmarshal(original, &changed)
@@ -82,7 +82,6 @@ func TestManagedPolicyIsolationAndFailClosedEnvelopes(t *testing.T) {
 func TestManagedFRPPluginVerifiesPerConnectorProofAndPortOwnership(t *testing.T) {
 	a, p, _ := managedFixture(t)
 	_, a.identities, _ = a.plan(p)
-	a.validUntil = p.ValidUntil
 	call := func(op string, content any) plugin.Response {
 		data, _ := json.Marshal(obj{"op": op, "content": content})
 		r := httptest.NewRequest("POST", "http://127.0.0.1/authorize/connector_a", bytes.NewReader(data))
@@ -128,12 +127,14 @@ func TestManagedFRPPluginVerifiesPerConnectorProofAndPortOwnership(t *testing.T)
 			t.Fatal(op, "stale proof accepted")
 		}
 	}
-	a.validUntil = time.Now().Add(-time.Second)
-	if !call("NewProxy", proxy).Reject {
-		t.Fatal("expired lease still authorizes registration")
+	// Configuration freshness does not expire the applied authorization.
+	proxy["proxy_type"] = "tcp"
+	proxy["remote_port"] = p.Policies[0].Services[0].RemotePort
+	if call("NewProxy", proxy).Reject {
+		t.Fatal("applied authorization must remain usable")
 	}
 }
-func TestManagedVLESSFRPAndLeaseExpiry(t *testing.T) {
+func TestManagedVLESSFRPRetainsAppliedPolicy(t *testing.T) {
 	if testing.Short() {
 		t.Skip("managed bridge integration")
 	}
@@ -152,7 +153,6 @@ func TestManagedVLESSFRPAndLeaseExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.identities = identities
-	a.validUntil = p.ValidUntil
 	a.revision = p.Revision
 	// Portable test ports; the production envelope keeps frps on 7000.
 	proxyPort, control, socks := freePort(t), freePort(t), freePort(t)
@@ -203,15 +203,15 @@ func TestManagedVLESSFRPAndLeaseExpiry(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	app.denied(t, control)
-	a.mu.Lock()
-	a.validUntil = time.Now().Add(-time.Second)
-	a.mu.Unlock()
-	a.expire()
-	if a.runtime.Components()["sing-box"] == "active" {
-		t.Fatal("expired lease did not stop old connections")
+	p.ValidUntil = time.Now().Add(-time.Hour)
+	if _, _, err = a.plan(p); err != nil {
+		t.Fatal("freshness timestamp must not invalidate static policy", err)
+	}
+	if err = app.fetch(mapping); err != nil {
+		t.Fatal("applied bridge must keep forwarding", err)
 	}
 }
-func TestManagedSyncRequiresScopedFreshConfigurationAndACK(t *testing.T) {
+func TestManagedSyncRetainsLastGoodPolicyAndSkipsUnchangedRestarts(t *testing.T) {
 	a, p, _ := managedFixture(t)
 	p.Policies = nil
 	p.Node.Status = "disabled"
@@ -249,16 +249,28 @@ func TestManagedSyncRequiresScopedFreshConfigurationAndACK(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatal("ready health rejected", w.Body.String())
 	}
+	boxBefore := a.runtime.box
+	p.Revision = "2"
+	p.ValidUntil = time.Now().Add(-time.Hour)
+	if err := a.sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if a.runtime.box != boxBefore || a.ackedRevision != "2" {
+		t.Fatal("unchanged policy restarted the runtime or failed to ACK")
+	}
 	p.Revision = "0"
 	if a.sync(context.Background()) == nil {
 		t.Fatal("configuration rollback accepted")
 	}
-	p.Revision = "1"
-	p.ValidUntil = time.Now().Add(-time.Second)
-	if a.sync(context.Background()) == nil {
-		t.Fatal("expired profile accepted")
+	if a.runtime.box != boxBefore || a.runtime.Components()["sing-box"] != "active" {
+		t.Fatal("rollback disturbed last good runtime")
 	}
-	if a.runtime.Components()["sing-box"] == "active" {
-		t.Fatal("invalid profile left old runtime active")
+	p.Revision = "3"
+	p.Node.NodeID = "wrong-node"
+	if a.sync(context.Background()) == nil {
+		t.Fatal("wrong node accepted")
+	}
+	if a.runtime.box != boxBefore {
+		t.Fatal("invalid update restarted runtime")
 	}
 }

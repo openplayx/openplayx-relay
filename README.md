@@ -190,4 +190,4 @@ fields follow these pinned versions.
 
 ## Centrally managed nodes
 
-The separate `managed --config <private-file>` mode consumes the central Relay profile, isolates Connector frps instances on loopback, applies per-identity port grants, acknowledges applied revisions, and stops forwarding when its lease expires. Legacy `serve`/`pair` mode is unchanged. See [managed mode](docs/managed.zh-CN.md) for deployment and current limits.
+The separate `managed --config <private-file>` mode consumes the central Relay profile, isolates Connector frps instances on loopback, applies per-identity port grants, acknowledges applied revisions, and retains its applied policy across freshness expiry and temporary API failures. Identical policy refreshes do not restart forwarding; real authorization changes still require an interrupting reload. Legacy `serve`/`pair` mode is unchanged. See [managed mode](docs/managed.md) for deployment and current limits.
