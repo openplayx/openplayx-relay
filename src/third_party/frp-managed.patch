@@ -1,0 +1,320 @@
+--- a/server/service.go
++++ b/server/service.go
+@@ -23,6 +23,7 @@
+ 	"net/http"
+ 	"os"
+ 	"strconv"
++	"sync"
+ 	"time"
+ 
+ 	"github.com/fatedier/golib/crypto"
+@@ -72,6 +73,13 @@
+ 
+ // Server service
+ type Service struct {
++	runMu     sync.Mutex
++	closing   bool
++	closeOnce sync.Once
++
++	// managedProxyGate serializes policy commits with plugin authorization and proxy creation.
++	managedProxyGate sync.RWMutex
++
+ 	// Dispatch connections to different handlers listen on same port
+ 	muxer *mux.Mux
+ 
+@@ -340,9 +348,15 @@
+ }
+ 
+ func (svr *Service) Run(ctx context.Context) {
++	svr.runMu.Lock()
++	if svr.closing {
++		svr.runMu.Unlock()
++		return
++	}
+ 	ctx, cancel := context.WithCancel(ctx)
+ 	svr.ctx = ctx
+ 	svr.cancel = cancel
++	svr.runMu.Unlock()
+ 
+ 	// run dashboard web server.
+ 	if svr.webServer != nil {
+@@ -383,36 +397,44 @@
+ }
+ 
+ func (svr *Service) Close() error {
+-	if svr.kcpListener != nil {
+-		svr.kcpListener.Close()
+-	}
+-	if svr.quicListener != nil {
+-		svr.quicListener.Close()
+-	}
+-	if svr.websocketListener != nil {
+-		svr.websocketListener.Close()
+-	}
+-	if svr.tlsListener != nil {
+-		svr.tlsListener.Close()
+-	}
+-	if svr.sshTunnelListener != nil {
+-		svr.sshTunnelListener.Close()
+-	}
+-	if svr.listener != nil {
+-		svr.listener.Close()
+-	}
+-	if svr.webServer != nil {
+-		svr.webServer.Close()
+-	}
+-	if svr.sshTunnelGateway != nil {
+-		svr.sshTunnelGateway.Close()
+-	}
+-	svr.rc.Close()
+-	svr.muxer.Close()
+-	svr.ctlManager.Close()
+-	if svr.cancel != nil {
+-		svr.cancel()
+-	}
++	svr.closeOnce.Do(func() {
++		svr.runMu.Lock()
++		svr.closing = true
++		cancel := svr.cancel
++		svr.runMu.Unlock()
++		if cancel != nil {
++			cancel()
++		}
++
++		if svr.kcpListener != nil {
++			svr.kcpListener.Close()
++		}
++		if svr.quicListener != nil {
++			svr.quicListener.Close()
++		}
++		if svr.websocketListener != nil {
++			svr.websocketListener.Close()
++		}
++		if svr.tlsListener != nil {
++			svr.tlsListener.Close()
++		}
++		if svr.sshTunnelListener != nil {
++			svr.sshTunnelListener.Close()
++		}
++		if svr.listener != nil {
++			svr.listener.Close()
++		}
++		if svr.webServer != nil {
++			svr.webServer.Close()
++		}
++		if svr.sshTunnelGateway != nil {
++			svr.sshTunnelGateway.Close()
++		}
++		svr.rc.Close()
++		svr.muxer.Close()
++		svr.ctlManager.Close()
++
++	})
+ 	return nil
+ }
+ 
+@@ -565,6 +587,8 @@
+ }
+ 
+ func (svr *Service) RegisterControl(ctlConn net.Conn, loginMsg *msg.Login, internal bool) error {
++	svr.managedProxyGate.RLock()
++	defer svr.managedProxyGate.RUnlock()
+ 	// If client's RunID is empty, it's a new client, we just create a new controller.
+ 	// Otherwise, we check if there is one controller has the same run id. If so, we release previous controller and start new one.
+ 	var err error
+@@ -602,6 +626,7 @@
+ 		oldCtl.WaitClosed()
+ 	}
+ 
++	ctl.managedProxyGate = &svr.managedProxyGate
+ 	ctl.Start()
+ 
+ 	// for statistics
+--- a/server/control.go
++++ b/server/control.go
+@@ -95,6 +95,8 @@
+ }
+ 
+ type Control struct {
++	managedProxyGate *sync.RWMutex
++
+ 	// all resource managers and controllers
+ 	rc *controller.ResourceController
+ 
+@@ -230,6 +232,15 @@
+ }
+ 
+ func (ctl *Control) RegisterWorkConn(conn net.Conn) error {
++	// Serialize sends with worker closing the work-connection channel.
++	ctl.mu.RLock()
++	defer ctl.mu.RUnlock()
++	select {
++	case <-ctl.doneCh:
++		return fmt.Errorf("control closed")
++	default:
++	}
++
+ 	xl := ctl.xl
+ 	defer func() {
+ 		if err := recover(); err != nil {
+@@ -368,6 +379,10 @@
+ }
+ 
+ func (ctl *Control) handleNewProxy(m msg.Message) {
++	if ctl.managedProxyGate != nil {
++		ctl.managedProxyGate.RLock()
++		defer ctl.managedProxyGate.RUnlock()
++	}
+ 	xl := ctl.xl
+ 	inMsg := m.(*msg.NewProxy)
+ 
+--- a/server/managed.go
++++ b/server/managed.go
+@@ -0,0 +1,39 @@
++// Copyright 2026 OpenPlayX contributors. Licensed under Apache-2.0.
++package server
++
++import (
++	v1 "github.com/fatedier/frp/pkg/config/v1"
++	"github.com/fatedier/frp/pkg/msg"
++)
++
++// LockProxyUpdates freezes registrations across plugin approval and binding.
++func (svr *Service) LockProxyUpdates()   { svr.managedProxyGate.Lock() }
++func (svr *Service) UnlockProxyUpdates() { svr.managedProxyGate.Unlock() }
++
++// PruneManagedProxies closes only disallowed TCP proxies. Call while holding
++// the exclusive update gate. Allowed proxies and control connections stay live.
++func (svr *Service) PruneManagedProxies(keep func(user, name string, port int) bool) error {
++	svr.ctlManager.mu.RLock()
++	controls := make([]*Control, 0, len(svr.ctlManager.ctlsByRunID))
++	for _, ctl := range svr.ctlManager.ctlsByRunID {
++		controls = append(controls, ctl)
++	}
++	svr.ctlManager.mu.RUnlock()
++	for _, ctl := range controls {
++		ctl.mu.RLock()
++		names := []string{}
++		for name, proxy := range ctl.proxies {
++			cfg, ok := proxy.GetConfigurer().(*v1.TCPProxyConfig)
++			if !ok || !keep(ctl.loginMsg.User, name, cfg.RemotePort) {
++				names = append(names, name)
++			}
++		}
++		ctl.mu.RUnlock()
++		for _, name := range names {
++			if err := ctl.CloseProxy(&msg.CloseProxy{ProxyName: name}); err != nil {
++				return err
++			}
++		}
++	}
++	return nil
++}
+--- a/client/service.go
++++ b/client/service.go
+@@ -224,7 +224,12 @@
+ }
+ 
+ func (svr *Service) keepControllerWorking() {
+-	<-svr.ctl.Done()
++	svr.ctlMu.RLock()
++	ctl := svr.ctl
++	svr.ctlMu.RUnlock()
++	if ctl != nil {
++		<-ctl.Done()
++	}
+ 
+ 	// There is a situation where the login is successful but due to certain reasons,
+ 	// the control immediately exits. It is necessary to limit the frequency of reconnection in this case.
+@@ -234,8 +239,11 @@
+ 		// loopLoginUntilSuccess is another layer of loop that will continuously attempt to
+ 		// login to the server until successful.
+ 		svr.loopLoginUntilSuccess(20*time.Second, false)
+-		if svr.ctl != nil {
+-			<-svr.ctl.Done()
++		svr.ctlMu.RLock()
++		current := svr.ctl
++		svr.ctlMu.RUnlock()
++		if current != nil {
++			<-current.Done()
+ 			return false, errors.New("control is closed and try another loop")
+ 		}
+ 		// If the control is nil, it means that the login failed and the service is also closed.
+@@ -388,7 +396,7 @@
+ 	svr.ctlMu.RUnlock()
+ 
+ 	if ctl != nil {
+-		return svr.ctl.UpdateAllConfigurer(proxyCfgs, visitorCfgs)
++		return ctl.UpdateAllConfigurer(proxyCfgs, visitorCfgs)
+ 	}
+ 	return nil
+ }
+--- a/client/proxy/proxy_wrapper.go
++++ b/client/proxy/proxy_wrapper.go
+@@ -22,8 +22,6 @@
+ 	"sync"
+ 	"sync/atomic"
+ 	"time"
+-
+-	"github.com/fatedier/golib/errors"
+ 
+ 	"github.com/fatedier/frp/client/event"
+ 	"github.com/fatedier/frp/client/health"
+@@ -168,6 +166,9 @@
+ func (pw *Wrapper) Stop() {
+ 	pw.mu.Lock()
+ 	defer pw.mu.Unlock()
++	if pw.Phase == ProxyPhaseClosed {
++		return
++	}
+ 	close(pw.closeCh)
+ 	close(pw.healthNotifyCh)
+ 	pw.pxy.Close()
+@@ -233,27 +234,31 @@
+ }
+ 
+ func (pw *Wrapper) statusNormalCallback() {
+-	xl := pw.xl
++	pw.mu.RLock()
++	defer pw.mu.RUnlock()
++	if pw.Phase == ProxyPhaseClosed {
++		return
++	}
+ 	atomic.StoreUint32(&pw.health, 0)
+-	_ = errors.PanicToError(func() {
+-		select {
+-		case pw.healthNotifyCh <- struct{}{}:
+-		default:
+-		}
+-	})
+-	xl.Infof("health check success")
++	select {
++	case pw.healthNotifyCh <- struct{}{}:
++	default:
++	}
++	pw.xl.Infof("health check success")
+ }
+ 
+ func (pw *Wrapper) statusFailedCallback() {
+-	xl := pw.xl
++	pw.mu.RLock()
++	defer pw.mu.RUnlock()
++	if pw.Phase == ProxyPhaseClosed {
++		return
++	}
+ 	atomic.StoreUint32(&pw.health, 1)
+-	_ = errors.PanicToError(func() {
+-		select {
+-		case pw.healthNotifyCh <- struct{}{}:
+-		default:
+-		}
+-	})
+-	xl.Infof("health check failed")
++	select {
++	case pw.healthNotifyCh <- struct{}{}:
++	default:
++	}
++	pw.xl.Infof("health check failed")
+ }
+ 
+ func (pw *Wrapper) InWorkConn(workConn net.Conn, m *msg.StartWorkConn) {

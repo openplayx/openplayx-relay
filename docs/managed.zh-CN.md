@@ -1,39 +1,31 @@
-# 中心托管 Relay
+# Relay 中心托管模式
 
-新增 `managed` 子命令，独立于现有 `serve` / `pair` 单家庭模式，不读取或转换旧的 relay.json。
+`managed --config /etc/openplayx-relay/managed.json` 使用节点专属 machineToken 拉取 `/v1/relay/node/config`，不读取旧的家庭配对配置。配置文件由部署流程写入，仅服务用户可读，云平台和 DNS Token 不进入节点。
 
-```sh
-openplayx-relay managed --config /var/lib/openplayx-relay-managed/managed.json
-```
+## 两类配置
 
-配置由 API 的 Vultr 初始化流程安全写入，包含 apiOrigin、nodeId、machineToken、host、certificate、key、releaseTag、releaseCommit、binaryVersion。文件仅服务用户可读。程序校验 HTTPS 中心地址、固定节点身份、受支持的配置 schema、单调递增 revision及自身 binaryVersion。
+| 分类 | 内容 | 更新方式 |
+|---|---|---|
+| 基础配置 | 节点身份、监听地址、TLS 身份与证书路径、协议参数、进程日志 | 部署时固定；变更可受控重启或重新部署 |
+| 用户策略 | 账号、Connector/设备身份和凭据、服务注册、设备服务授权 | 不可变快照热更新，不重启共享监听器和无关连接 |
 
-托管节点每 20 秒获取中心 `/v1/relay/node/config`，继续同步账号/服务权限。首次启动无本地缓存授权。相同权限内容即使全局 revision 或时间戳变化，也不重启转发进程；权限实际变化仍需关闭旧运行实例并重载，已有连接会中断，尚非无损热更新。应用成功后 ACK。移除配置过期自动停服，API 断连或无效/倒退更新时保留上次成功配置，不因刷新时间戳过期停服。
+API 的 baseRevision 标识节点传输身份，policyRevision 标识 userPolicies/credentials；全局 revision 保留用于有序 ACK。无法支持的基础传输变更会要求重新部署，不会虚假 ACK。配置时间戳仅作刷新参考，不触发过期停服；中心临时不可达或配置无效/倒退时，保留上次成功策略。
 
-## 身份与注册隔离
+## 平滑更新的边界
 
-VLESS 入口按 Connector/设备的独立 UUID 认证，只允许访问该身份的回环控制端口或授权服务端口，最后一条规则拒绝其余目标。
+- 常驻 TLS/VLESS 入口使用 sing-box 同源的上游 VLESS 实现，每次在旁路构造新的只读认证快照，不修改工作线程正在读取的认证表。新握手在转发前再次核对当前身份和授权。
+- 每个 Connector 保留独立的回环 frps。新增 Connector 仅创建它自己的实例；新增用户、设备、服务或授权，不重启已有实例、控制通道和传输连接。
+- frp 插件同时校验所属 Connector、服务 ID、代理名 `<connectorId>.<serviceId>` 和端口。内部 frps 的允许端口范围放宽给动态注册使用，实际访问仍由插件和 VLESS 网关双重精确授权，端口不向公网暴露。
+- 注册冻结锁覆盖“插件批准 → 实际绑定”，防止批准与撤销之间的竞争。提交策略时仅取消被撤销或轮换的身份/服务连接，关闭对应原生 frps 代理并释放端口，完成后才 ACK。
+- 删除一个服务不会中断同一 Connector 的其他服务；撤销一个设备授权不会中断其他设备。轮换 Connector 的 frp Token 会重建该 Connector 的实例和相关连接，其他 Connector 保留。
+- 手机根据 TCP/TLS 测试结果主动固定节点，后台权限同步不自动切换节点。托管服务端口只能在撤销 ACK 或云实例销毁确认后回收，不能按时间超时直接复用。
 
-frp 的原生 Token 同时用于认证和控制流加密，不能只在登录插件中替换成共享 Token。因此托管模式在同一进程内为各 Connector 启动独立的回环 frps，使用该 Connector 的原生凭据；sing-box 按已验证的 Connector 身份将逻辑 7000 端口转向对应回环监听。原始 frps 端口不暴露给客户端。插件再次校验 Connector 身份、时间凭据和 TCP remotePort 归属，阻止跨 Connector 注册。
+managed 模式支持 API 当前生成的 TCP/TLS VLESS 配置，不启用 UDP、VLESS 多路复用或 Vision；旧 sing-box 模式的能力不变。证书更新钩子可重启服务；frp 进程日志只在首次启动初始化，日志参数变更需要进程重启。
 
-当前实现身份/端口授权、配置应用/撤销及保留上次成功策略；userPolicies 中的带宽与连接数配额尚未接入专门的运行时限速器，不能作为精确流量计费或硬配额承诺。
+## 验证与限制
 
-## TLS 与健康检查
+运行 `go test ./...`、`go vet ./...`、`go test -race ./...`。真实链路使用原生 sing-box App/Home 与 frp，在同一条持续收发连接中执行服务/设备/账号新增、授权撤销、服务删除、设备凭据轮换，检查无关连接存活、对应连接关闭、端口释放以及组件身份保留。
 
-公网 443 通过现有 SNI 分流器共享：节点域名转入 VLESS，status.<节点域名> 转入最小 HTTPS 健康接口。健康接口需要节点自身机器 Token，只返回节点 ID、托管协议版本、发布 tag/commit、实际 binaryVersion、已应用/ACK 的配置版本和组件状态。
+固定 frp v0.65.0 源码与定向热更新/并发补丁位于 src/third_party，保留上游 Apache-2.0 版权和许可证。已修复此前发现的通道关闭/发送、控制器指针访问竞争；当前完整 race 测试通过，不代表对上游所有行为完成审计。
 
-只有完成配置应用并 ACK 的进程才返回 active。证书/私钥只在本机，ACME 使用 80 端口；中心创建 DNS-only 记录，不能用 Cloudflare 普通 HTTP 代理承载 VLESS。API 自动安装脚本会配置证书续签后的本地复制及服务重启。
-
-## 发布与联调
-
-先运行 `go vet ./...`、`go test ./...`；托管测试含真实 VLESS → frps → Connector → HTTP 媒体访问、未授权端口拒绝及刷新/异常情况下保持转发。还可使用 `go test -race -run Managed ./...` 检查并发。
-
-通过现有构建脚本/CI 发布 amd64 Linux 产物，在 API 中配置固定发布 tag、commit、下载 URL、SHA256 和 binaryVersion。Jenkins 的产物版本一般去掉 tag 的 v 前缀；两者分别记录，不要随意改为 latest。兼容原始二进制或已有 tar.gz 发布包。
-
-这不会将旧 App/Home 自动迁移为中心订阅客户端；原来的配对模式继续工作。中心托管客户端应使用各自的 account/device/connector API 身份和下发配置，不可复用用户密码、节点 Token 或管理员 Token。
-
-### 并发检查的已知限制
-
-自有策略/插件/配置同步可以独立运行 `go test -race -run '^TestManaged(Policy|FRPPlugin|Sync)' ./...`。完整媒体链路的 race 检查会触发固定 frp v0.65.0 上游的 client/proxy wrapper.Stop 与 health callback、server/control worker 与 RegisterWorkConn 的 channel close/send 竞态；本次没有修改或升级上游库，不能将完整 race 检查列为通过。常规真实链路测试通过。
-
-手机端根据 TCP/TLS 测试结果主动选择并固定节点，后台刷新不自动切换。取消过期停服后，托管节点服务端口必须等撤销 ACK 或 Vultr 实例销毁确认才允许回收；节点退休或等待超时本身不代表旧策略已停止。
+userPolicies 的带宽与连接数限额尚未接入运行时硬限额，不能用于精确计费承诺。服务 ready 与每个用户 NAS 实际可达仍是不同指标。

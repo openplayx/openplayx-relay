@@ -109,8 +109,16 @@ func (r *Runtime) Stop() error {
 	return nil
 }
 
+var frpLogOnce sync.Once
+
+// frp exposes a process-wide logger pointer. Initialize before starting any
+// workers; replacing it during a reload races with their log writes.
+func initializeFRPLogging(level string) {
+	frpLogOnce.Do(func() { frplog.InitLogger("console", level, 0, true) })
+}
+
 func (r *Runtime) startLocked(plan *Plan) error {
-	frplog.InitLogger("console", plan.LogLevel, 0, true)
+	initializeFRPLogging(plan.LogLevel)
 	attempts := 1
 	if r.role == roleHome {
 		attempts = 3

@@ -1,11 +1,28 @@
 # Managed Relay mode
 
-`openplayx-relay managed -config /etc/openplayx-relay/managed.json` subscribes to the first-party node profile using a dedicated machine credential. This mode is provisioned by the API's `/adminzzz/relay` workflow and is separate from legacy single-household pairing.
+`openplayx-relay managed -config /etc/openplayx-relay/managed.json` subscribes to the central node profile using its dedicated machine credential. It is separate from legacy household `serve`/`pair` configuration.
 
-Enabled/preparing profiles and empty disabled profiles are accepted. Revisions cannot move backwards. Freshness timestamps do not stop forwarding: temporary API failures and rejected updates retain the last applied policy. Revisions with identical authorization do not restart the runtime. Actual identity or port changes still reload the runtime and interrupt existing connections; this is not a zero-downtime reload. The node ACKs only after the effective policy is applied. Its protected TLS health endpoint reports the node, release and applied revision.
+## Base configuration and dynamic policy
 
-Each Connector has its own loopback frps and authentication token. VLESS identities can reach only their logical control port or explicitly granted service ports. No frps or mapped service port is exposed publicly. Node TLS keys stay on the node; it never receives Vultr or DNS credentials.
+| Part | Contents | Application |
+|---|---|---|
+| Base | Node identity, listen address, TLS identity/certificate paths, protocol settings, process logging | Deployment configuration; a controlled restart or reprovisioning is allowed |
+| Policy | Accounts, Connector/device identities and credentials, service registration, per-device service grants | Immutable snapshot update; no shared listener or unrelated stream restart |
 
-Run `cd src && go test ./...` and `go vet ./...`. The tests include a real VLESS → frps → Connector → HTTP media path and retention of the last applied policy. The pinned frp v0.65.0 dependency reports internal close/send races during full managed race tests; isolated policy/plugin/sync race tests pass. Do not describe the full path as race-clean. See [Chinese operational details](managed.zh-CN.md).
+The API returns `baseRevision` for the node transport identity and `policyRevision` for `userPolicies`/`credentials`. The global `revision` remains the ordered ACK reference. Unsupported base transport changes are rejected for reprovisioning rather than silently ACKed.
 
-Phones choose a Relay node explicitly after TCP/TLS reachability tests. Background refresh never switches the selected node. Managed service ports remain reserved until the node ACKs revocation or Vultr confirms instance destruction; elapsed freshness time alone never permits reuse.
+The stable TLS/VLESS entry uses the same upstream VLESS implementation as sing-box. A new protocol authentication service is built off-path for each immutable snapshot. No live authentication map is mutated. Managed mode supports the TCP/TLS profile emitted by the API; UDP, VLESS multiplexing and Vision are not enabled. Legacy sing-box modes retain their existing capabilities.
+
+Each Connector owns a separate loopback frps and token. Adding a Connector stages only its new frps. Service additions update the plugin's exact Connector/service/port checks and retain existing control and work connections. The private frps port range is broad, but the plugin requires both the owned port and the exact `<connectorId>.<serviceId>` proxy name. The public gateway allows only explicitly granted loopback destinations.
+
+A transaction gate spans frp plugin approval through proxy binding. Policy commits freeze new registrations, publish the snapshot, close only revoked/rotated device or service streams, prune only removed native frps proxies, then release registrations. ACK follows completed cleanup. Removing a service releases its listener before its mapping port can be reused. Rotating a Connector's frp token replaces that Connector's frps and connections; other Connectors remain live.
+
+New handshakes revalidate their authenticated identity and destination against the current snapshot. A handshake or pending dial that overlaps revocation cannot resurrect removed access. Invalid updates and revision rollback retain the last applied policy. Freshness timestamps never stop forwarding. Phones test and choose a fixed node; policy polling never switches that choice.
+
+## Verification
+
+Run `cd src && go test ./...`, `go vet ./...`, and `go test -race ./...`. Real tests use native sing-box App/Home clients and frp with a continuously transmitting TCP stream while registering services/devices/accounts, revoking grants, deleting a service and rotating a device UUID. They verify listener/control identity retention, targeted disconnects and immediate service-port release.
+
+The pinned frp source and narrow update/concurrency patches are in `src/third_party/`; see its README and retained Apache-2.0 notices. The previously observed channel and control-pointer races have local fixes; the current full race suite passes. This does not imply that every upstream behavior has been audited.
+
+Bandwidth and connection-count limits from `userPolicies` are not implemented as runtime quota enforcement. See [Chinese details](managed.zh-CN.md).

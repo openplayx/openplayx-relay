@@ -5,6 +5,7 @@ go 1.24.0
 require (
 	github.com/fatedier/frp v0.65.0
 	github.com/sagernet/sing v0.7.13
+	github.com/sagernet/sing-vmess v0.2.7
 	github.com/sagernet/sing-box v1.12.12
 	golang.org/x/crypto v0.41.0
 )
@@ -105,7 +106,6 @@ require (
 	github.com/sagernet/sing-shadowsocks2 v0.2.1 // indirect
 	github.com/sagernet/sing-shadowtls v0.2.1-0.20250503051639-fcd445d33c11 // indirect
 	github.com/sagernet/sing-tun v0.7.3 // indirect
-	github.com/sagernet/sing-vmess v0.2.7 // indirect
 	github.com/sagernet/smux v1.5.34-mod.2 // indirect
 	github.com/sagernet/tailscale v1.80.3-sing-box-1.12-mod.2 // indirect
 	github.com/sagernet/wireguard-go v0.0.1-beta.7 // indirect
@@ -161,3 +161,6 @@ require (
 	sigs.k8s.io/json v0.0.0-20221116044647-bc3834ca7abd // indirect
 	sigs.k8s.io/yaml v1.3.0 // indirect
 )
+
+// Pinned upstream source with narrow managed proxy update hooks.
+replace github.com/fatedier/frp => ./third_party/frp

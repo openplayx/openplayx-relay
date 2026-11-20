@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -23,7 +24,9 @@ func managedFixture(t *testing.T) (*managedAgent, managedProfile, []byte) {
 	certPath, keyPath := filepath.Join(root, "tls.crt"), filepath.Join(root, "tls.key")
 	writeFile(t, certPath, certificate)
 	writeFile(t, keyPath, key)
-	a := &managedAgent{config: managedConfig{APIOrigin: "https://api.example.com", NodeID: "node_test", MachineToken: strings.Repeat("node-token", 5), Host: "localhost", Certificate: certPath, Key: keyPath, ReleaseTag: "v-test", ReleaseCommit: strings.Repeat("a", 40)}, runtime: NewRuntime(roleRelay), identities: map[string]managedIdentity{}, serverToken: strings.Repeat("internal-token", 4), pluginAddress: "127.0.0.1:9999"}
+	a := &managedAgent{config: managedConfig{APIOrigin: "https://api.example.com", NodeID: "node_test", MachineToken: strings.Repeat("node-token", 5), Host: "localhost", Certificate: certPath, Key: keyPath, ReleaseTag: "v-test", ReleaseCommit: strings.Repeat("a", 40)}, identities: map[string]managedIdentity{}, pluginAddress: "127.0.0.1:9999"}
+	a.runtime = newManagedDataPlane(a.config)
+	a.runtime.listenAddress = "127.0.0.1:0"
 	var p managedProfile
 	p.SchemaVersion = 1
 	p.Revision = "1"
@@ -42,16 +45,14 @@ func TestManagedPolicyIsolationAndFailClosedEnvelopes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = checkPlan(plan); err != nil {
-		t.Fatal(err)
+	if len(plan.servers) != 1 {
+		t.Fatal("missing Connector transport")
 	}
 	if !identities["connector_a"].ports[p.Policies[0].Services[0].RemotePort] {
 		t.Fatal("connector lost owned port")
 	}
-	var rendered obj
-	_ = json.Unmarshal(plan.SingBox, &rendered)
-	rules := rendered["route"].(map[string]any)["rules"].([]any)
-	if rules[len(rules)-1].(map[string]any)["action"] != "reject" {
+	snapshot := a.runtime.compile(p, identities, map[string]*managedServer{"connector_a": {port: 42000, token: p.Credentials["connector_frp"].Value}})
+	if snapshot.permits(managedAuth{"unknown", "unknown"}, managedRoute{Port: 1}) {
 		t.Fatal("missing default deny")
 	}
 	original, _ := json.Marshal(p)
@@ -82,6 +83,7 @@ func TestManagedPolicyIsolationAndFailClosedEnvelopes(t *testing.T) {
 func TestManagedFRPPluginVerifiesPerConnectorProofAndPortOwnership(t *testing.T) {
 	a, p, _ := managedFixture(t)
 	_, a.identities, _ = a.plan(p)
+	a.runtime.snapshot = a.runtime.compile(p, a.identities, map[string]*managedServer{"connector_a": {port: 42000, token: p.Credentials["connector_frp"].Value}})
 	call := func(op string, content any) plugin.Response {
 		data, _ := json.Marshal(obj{"op": op, "content": content})
 		r := httptest.NewRequest("POST", "http://127.0.0.1/authorize/connector_a", bytes.NewReader(data))
@@ -105,7 +107,7 @@ func TestManagedFRPPluginVerifiesPerConnectorProofAndPortOwnership(t *testing.T)
 	if !call("Login", login).Reject {
 		t.Fatal("forged connector proof accepted")
 	}
-	proxy := obj{"user": obj{"user": "connector_a"}, "proxy_type": "tcp", "remote_port": p.Policies[0].Services[0].RemotePort}
+	proxy := obj{"user": obj{"user": "connector_a"}, "proxy_name": "connector_a.service_a", "proxy_type": "tcp", "remote_port": p.Policies[0].Services[0].RemotePort}
 	if call("NewProxy", proxy).Reject {
 		t.Fatal("owned TCP service rejected")
 	}
@@ -152,23 +154,15 @@ func TestManagedVLESSFRPRetainsAppliedPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.identities = identities
 	a.revision = p.Revision
-	// Portable test ports; the production envelope keeps frps on 7000.
-	proxyPort, control, socks := freePort(t), freePort(t), freePort(t)
-	var sing, frp obj
-	_ = json.Unmarshal(plan.SingBox, &sing)
-	_ = json.Unmarshal(plan.FRP, &frp)
-	inbound := sing["inbounds"].([]any)[0].(map[string]any)
-	inbound["listen_port"] = proxyPort
-	sing["route"].(map[string]any)["rules"].([]any)[0].(map[string]any)["port"] = []any{control}
-	frp["bindPort"] = control
-	plan.SingBox, _ = json.Marshal(sing)
-	plan.FRP, _ = json.Marshal(frp)
-	if err = a.runtime.Restart(nil, plan); err != nil {
+	if err = a.runtime.Apply(p, plan, identities); err != nil {
 		t.Fatal(err)
 	}
 	defer a.runtime.Stop()
+	address, _, _ := a.runtime.proxyTarget()
+	_, proxyNumber, _ := net.SplitHostPort(address)
+	proxyPort, _ := strconv.Atoi(proxyNumber)
+	control, socks := 7000, freePort(t)
 	root := t.TempDir()
 	home, _ := NewStore(root, roleHome)
 	writeFile(t, home.file("tls/ca.crt"), certificate)
@@ -249,20 +243,20 @@ func TestManagedSyncRetainsLastGoodPolicyAndSkipsUnchangedRestarts(t *testing.T)
 	if w.Code != 200 {
 		t.Fatal("ready health rejected", w.Body.String())
 	}
-	boxBefore := a.runtime.box
+	boxBefore := a.runtime.listener
 	p.Revision = "2"
 	p.ValidUntil = time.Now().Add(-time.Hour)
 	if err := a.sync(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if a.runtime.box != boxBefore || a.ackedRevision != "2" {
+	if a.runtime.listener != boxBefore || a.ackedRevision != "2" {
 		t.Fatal("unchanged policy restarted the runtime or failed to ACK")
 	}
 	p.Revision = "0"
 	if a.sync(context.Background()) == nil {
 		t.Fatal("configuration rollback accepted")
 	}
-	if a.runtime.box != boxBefore || a.runtime.Components()["sing-box"] != "active" {
+	if a.runtime.listener != boxBefore || a.runtime.Components()["vless"] != "active" {
 		t.Fatal("rollback disturbed last good runtime")
 	}
 	p.Revision = "3"
@@ -270,7 +264,7 @@ func TestManagedSyncRetainsLastGoodPolicyAndSkipsUnchangedRestarts(t *testing.T)
 	if a.sync(context.Background()) == nil {
 		t.Fatal("wrong node accepted")
 	}
-	if a.runtime.box != boxBefore {
+	if a.runtime.listener != boxBefore {
 		t.Fatal("invalid update restarted runtime")
 	}
 }

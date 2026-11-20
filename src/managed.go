@@ -3,17 +3,13 @@ package main
 // Managed mode is isolated from the legacy single-household configuration.
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	plugin "github.com/fatedier/frp/pkg/plugin/server"
-	"github.com/fatedier/frp/pkg/util/util"
 	"io"
 	"net"
 	"net/http"
@@ -66,14 +62,18 @@ type managedPolicy struct {
 	Services   []managedService   `json:"services"`
 }
 type managedProfile struct {
-	SchemaVersion int       `json:"schemaVersion"`
-	Revision      string    `json:"revision"`
-	ValidUntil    time.Time `json:"validUntil"`
-	Node          struct {
-		NodeID      string `json:"nodeId"`
-		Host        string `json:"host"`
-		Status      string `json:"status"`
-		ControlPort int    `json:"frpsControlPort"`
+	SchemaVersion  int       `json:"schemaVersion"`
+	Revision       string    `json:"revision"`
+	BaseRevision   string    `json:"baseRevision"`
+	PolicyRevision string    `json:"policyRevision"`
+	ValidUntil     time.Time `json:"validUntil"`
+	Node           struct {
+		NodeID        string `json:"nodeId"`
+		Host          string `json:"host"`
+		Status        string `json:"status"`
+		ControlPort   int    `json:"frpsControlPort"`
+		Port          int    `json:"port"`
+		TLSServerName string `json:"tlsServerName"`
 	} `json:"node"`
 	Policies    []managedPolicy              `json:"userPolicies"`
 	Credentials map[string]managedCredential `json:"credentials"`
@@ -83,13 +83,15 @@ type managedIdentity struct {
 	ports map[int]bool
 }
 type managedAgent struct {
+	syncMu          sync.Mutex
 	mu              sync.RWMutex
 	config          managedConfig
-	runtime         *Runtime
+	runtime         *managedDataPlane
 	revision        string
+	baseRevision    string
+	policyRevision  string
 	policyHash      [32]byte
 	identities      map[string]managedIdentity
-	serverToken     string
 	client          *http.Client
 	pluginAddress   string
 	nodeState       string
@@ -117,9 +119,15 @@ func (m *managedAgent) credential(p managedProfile, ref, kind string) (string, e
 	}
 	return c.Value, nil
 }
-func (m *managedAgent) plan(p managedProfile) (*Plan, map[string]managedIdentity, error) {
+
+type managedPlan struct{ servers map[string][]byte }
+
+func (m *managedAgent) plan(p managedProfile) (*managedPlan, map[string]managedIdentity, error) {
 	if p.SchemaVersion != 1 || p.Node.NodeID != m.config.NodeID || p.Node.Host != m.config.Host || p.Node.ControlPort != 7000 {
 		return nil, nil, errors.New("invalid managed profile envelope")
+	}
+	if (p.Node.Port != 0 && p.Node.Port != 443) || (p.Node.TLSServerName != "" && p.Node.TLSServerName != m.config.Host) {
+		return nil, nil, errors.New("base transport configuration requires reprovisioning")
 	}
 	if _, err := strconv.ParseUint(p.Revision, 10, 64); err != nil {
 		return nil, nil, errors.New("invalid managed revision")
@@ -130,10 +138,7 @@ func (m *managedAgent) plan(p managedProfile) (*Plan, map[string]managedIdentity
 	if p.Node.Status == "disabled" && len(p.Policies) > 0 {
 		return nil, nil, errors.New("disabled node carries user policies")
 	}
-	servers := [][]byte{}
-	users := []any{}
-	rules := []any{}
-	allow := []any{}
+	servers := map[string][]byte{}
 	identities := map[string]managedIdentity{}
 	names := map[string]bool{}
 	uuids := map[string]bool{}
@@ -144,19 +149,14 @@ func (m *managedAgent) plan(p managedProfile) (*Plan, map[string]managedIdentity
 			reservedControl[service.RemotePort] = true
 		}
 	}
-	secrets := obj{}
-	addUser := func(name, ref string, ports []any) error {
+	addUser := func(name, ref string) error {
 		uuid, err := m.credential(p, ref, "vless_uuid")
 		if err != nil || !parseUUID(uuid) || names[name] || uuids[uuid] || name == "" {
 			return errors.New("invalid or duplicate managed identity")
 		}
 		names[name] = true
 		uuids[uuid] = true
-		secrets[ref] = uuid
-		users = append(users, obj{"name": name, "uuid": uuid})
-		if len(ports) > 0 {
-			rules = append(rules, obj{"auth_user": []any{name}, "ip_cidr": []any{"127.0.0.1/32"}, "port": ports, "action": "route", "outbound": "direct"})
-		}
+
 		return nil
 	}
 	for _, policy := range p.Policies {
@@ -177,17 +177,15 @@ func (m *managedAgent) plan(p managedProfile) (*Plan, map[string]managedIdentity
 			}
 			portsSeen[s.RemotePort] = true
 			services[s.ServiceID] = s
-			allow = append(allow, obj{"single": s.RemotePort})
 		}
 		for _, c := range policy.Connectors {
-			if err := addUser(c.ConnectorID, c.ProxyRef, []any{7000}); err != nil {
+			if err := addUser(c.ConnectorID, c.ProxyRef); err != nil {
 				return nil, nil, err
 			}
 			token, err := m.credential(p, c.FRPRef, "connector_frp_auth")
 			if err != nil || len(token) < 32 {
 				return nil, nil, errors.New("invalid connector frp credential")
 			}
-			secrets[c.FRPRef] = token
 			owned := map[int]bool{}
 			for _, s := range services {
 				if s.ConnectorID == c.ConnectorID {
@@ -198,7 +196,19 @@ func (m *managedAgent) plan(p managedProfile) (*Plan, map[string]managedIdentity
 			// Native frp encrypts its control stream with auth.token, so each
 			// Connector needs its own loopback frps, not just a login plugin.
 			controlPort := 0
-			for attempt := 0; attempt < 20; attempt++ {
+			m.runtime.mu.Lock()
+			existing := m.runtime.servers[c.ConnectorID]
+			if existing != nil && existing.token == token {
+				controlPort = existing.port
+			}
+			m.runtime.mu.Unlock()
+			if controlPort != 0 && reservedControl[controlPort] {
+				return nil, nil, errors.New("service collides with private control port")
+			}
+			if controlPort != 0 {
+				reservedControl[controlPort] = true
+			}
+			for attempt := 0; controlPort == 0 && attempt < 20; attempt++ {
 				listener, portErr := net.Listen("tcp", "127.0.0.1:0")
 				if portErr != nil {
 					return nil, nil, portErr
@@ -215,101 +225,26 @@ func (m *managedAgent) plan(p managedProfile) (*Plan, map[string]managedIdentity
 				return nil, nil, errors.New("no free managed control port")
 			}
 
-			rules[len(rules)-1].(obj)["override_port"] = controlPort
-			connectorAllow := []any{}
-			for number := range owned {
-				connectorAllow = append(connectorAllow, obj{"single": number})
-			}
-			server := obj{"bindAddr": "127.0.0.1", "bindPort": controlPort, "proxyBindAddr": "127.0.0.1", "auth": obj{"method": "token", "token": token, "additionalScopes": []any{"HeartBeats", "NewWorkConns"}}, "transport": obj{"tls": obj{"force": true, "certFile": m.config.Certificate, "keyFile": m.config.Key}}, "allowPorts": connectorAllow, "log": obj{"to": "console", "level": "error"}, "httpPlugins": []any{obj{"name": "managed-access", "addr": m.pluginAddress, "path": "/authorize/" + url.PathEscape(c.ConnectorID), "ops": []any{"Login", "NewProxy", "Ping", "NewWorkConn"}}}}
+			server := obj{"bindAddr": "127.0.0.1", "bindPort": controlPort, "proxyBindAddr": "127.0.0.1", "auth": obj{"method": "token", "token": token, "additionalScopes": []any{"HeartBeats", "NewWorkConns"}}, "transport": obj{"tls": obj{"force": true, "certFile": m.config.Certificate, "keyFile": m.config.Key}}, "allowPorts": []any{obj{"start": 1024, "end": 65535}}, "log": obj{"to": "console", "level": "error"}, "httpPlugins": []any{obj{"name": "managed-access", "addr": m.pluginAddress, "path": "/authorize/" + url.PathEscape(c.ConnectorID), "ops": []any{"Login", "NewProxy", "Ping", "NewWorkConn"}}}}
 			raw, _ := json.Marshal(server)
-			servers = append(servers, raw)
+			servers[c.ConnectorID] = raw
 		}
 		for _, d := range policy.Devices {
-			ports := []any{}
 			for _, serviceID := range d.Allowed {
-				s, ok := services[serviceID]
+				_, ok := services[serviceID]
 				if !ok {
 					return nil, nil, errors.New("cross-account managed grant")
 				}
-				ports = append(ports, s.RemotePort)
 			}
-			if err := addUser(d.DeviceID, d.ProxyRef, ports); err != nil {
+			if err := addUser(d.DeviceID, d.ProxyRef); err != nil {
 				return nil, nil, err
 			}
 		}
 	}
-	rules = append(rules, obj{"action": "reject"})
-	sing := obj{"log": obj{"level": "error"}, "inbounds": []any{obj{"type": "vless", "tag": "proxy", "listen": "127.0.0.1", "listen_port": 10443, "users": users, "tls": obj{"enabled": true, "server_name": m.config.Host, "certificate_path": m.config.Certificate, "key_path": m.config.Key}}}, "outbounds": []any{obj{"type": "direct", "tag": "direct"}}, "route": obj{"rules": rules}}
-	frp := obj{"bindAddr": "127.0.0.1", "bindPort": 7000, "proxyBindAddr": "127.0.0.1", "auth": obj{"method": "token", "token": m.serverToken, "additionalScopes": []any{"HeartBeats", "NewWorkConns"}}, "transport": obj{"tls": obj{"force": true, "certFile": m.config.Certificate, "keyFile": m.config.Key}}, "allowPorts": allow, "log": obj{"to": "console", "level": "error"}, "httpPlugins": []any{obj{"name": "managed-access", "addr": m.pluginAddress, "path": "/authorize", "ops": []any{"Login", "NewProxy", "Ping", "NewWorkConn"}}}}
-	plan := &Plan{Role: roleRelay, Revision: p.Revision, LogLevel: "error", ProxyAddress: "127.0.0.1:10443", ServerName: m.config.Host, secrets: secrets, FRPServers: servers}
-	var err error
-	plan.SingBox, err = json.Marshal(sing)
-	if err != nil {
-		return nil, nil, err
-	}
-	plan.FRP, err = json.Marshal(frp)
-	return plan, identities, err
+	return &managedPlan{servers: servers}, identities, nil
 }
-func (m *managedAgent) plugin(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	reject := func() {
-		_ = json.NewEncoder(w).Encode(plugin.Response{Reject: true, RejectReason: "managed policy denied"})
-	}
-	if r.Method != "POST" {
-		reject()
-		return
-	}
-	var req struct {
-		Op      string          `json:"op"`
-		Content json.RawMessage `json:"content"`
-	}
-	if json.NewDecoder(io.LimitReader(r.Body, 16385)).Decode(&req) != nil {
-		reject()
-		return
-	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	expected := strings.TrimPrefix(r.URL.Path, "/authorize/")
-	verify := func(user, key string, stamp int64) bool {
-		i, ok := m.identities[user]
-		return ok && user == expected && stamp > time.Now().Unix()-120 && stamp < time.Now().Unix()+30 && managedEqual(key, util.GetAuthKey(i.token, stamp))
-	}
-	var result any
-	switch req.Op {
-	case "Login":
-		var c plugin.LoginContent
-		if json.Unmarshal(req.Content, &c) != nil || !verify(c.User, c.PrivilegeKey, c.Timestamp) {
-			reject()
-			return
-		}
-		result = c
-	case "Ping":
-		var c plugin.PingContent
-		if json.Unmarshal(req.Content, &c) != nil || !verify(c.User.User, c.PrivilegeKey, c.Timestamp) {
-			reject()
-			return
-		}
-		result = c
-	case "NewWorkConn":
-		var c plugin.NewWorkConnContent
-		if json.Unmarshal(req.Content, &c) != nil || !verify(c.User.User, c.PrivilegeKey, c.Timestamp) {
-			reject()
-			return
-		}
-		result = c
-	case "NewProxy":
-		var c plugin.NewProxyContent
-		if json.Unmarshal(req.Content, &c) != nil || c.User.User != expected || c.ProxyType != "tcp" || !m.identities[c.User.User].ports[c.RemotePort] {
-			reject()
-			return
-		}
-		result = c
-	default:
-		reject()
-		return
-	}
-	_ = json.NewEncoder(w).Encode(plugin.Response{Content: result})
-}
+
+func (m *managedAgent) plugin(w http.ResponseWriter, r *http.Request) { m.runtime.plugin(w, r) }
 func (m *managedAgent) health(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/health" || r.Host != "status."+m.config.Host || !managedEqual(r.Header.Get("Authorization"), "Bearer "+m.config.MachineToken) {
 		http.NotFound(w, r)
@@ -319,15 +254,16 @@ func (m *managedAgent) health(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	m.mu.RLock()
 	revision, nodeState, acked := m.revision, m.nodeState, m.ackedRevision
+	baseRevision, policyRevision := m.baseRevision, m.policyRevision
 	m.mu.RUnlock()
 	components := m.runtime.Components()
 	status := "inactive"
-	if revision != "" && revision == acked && components["sing-box"] == "active" && components["frps"] == "active" {
+	if revision != "" && revision == acked && components["vless"] == "active" && components["frps"] == "active" {
 		status = "active"
 	} else {
 		w.WriteHeader(503)
 	}
-	_ = json.NewEncoder(w).Encode(obj{"nodeId": m.config.NodeID, "protocol": "managed-v1", "nodeState": nodeState, "releaseTag": m.config.ReleaseTag, "releaseCommit": m.config.ReleaseCommit, "binaryVersion": version, "revision": revision, "runtime": status})
+	_ = json.NewEncoder(w).Encode(obj{"nodeId": m.config.NodeID, "protocol": "managed-v1", "nodeState": nodeState, "releaseTag": m.config.ReleaseTag, "releaseCommit": m.config.ReleaseCommit, "binaryVersion": version, "revision": revision, "baseRevision": baseRevision, "policyRevision": policyRevision, "runtime": status})
 }
 func (m *managedAgent) request(ctx context.Context, path string, body any) (*http.Response, error) {
 	var reader io.Reader
@@ -347,6 +283,8 @@ func (m *managedAgent) request(ctx context.Context, path string, body any) (*htt
 	return m.client.Do(r)
 }
 func (m *managedAgent) sync(ctx context.Context) error {
+	m.syncMu.Lock()
+	defer m.syncMu.Unlock()
 	response, err := m.request(ctx, "/v1/relay/node/config", nil)
 	if err != nil {
 		return err
@@ -383,20 +321,17 @@ func (m *managedAgent) sync(ctx context.Context) error {
 	same := m.revision != "" && m.policyHash == hash
 	m.mu.RUnlock()
 	components := m.runtime.Components()
-	same = same && components["sing-box"] == "active" && components["frps"] == "active"
+	same = same && components["vless"] == "active" && components["frps"] == "active"
 	if !same {
-		_ = m.runtime.Stop()
-		m.mu.Lock()
-		m.identities = identities
-		m.revision = ""
-		m.mu.Unlock()
-		if err = m.runtime.Restart(nil, plan); err != nil {
-			return errors.New("managed runtime could not apply configuration")
+		if err = m.runtime.Apply(p, plan, identities); err != nil {
+			return errors.New("managed policy update failed")
 		}
 	}
 	m.mu.Lock()
 	m.revision = p.Revision
 	m.nodeState = p.Node.Status
+	m.baseRevision = p.BaseRevision
+	m.policyRevision = p.PolicyRevision
 	m.policyHash = hash
 	m.mu.Unlock()
 	ack, err := m.request(ctx, "/v1/relay/node/config-acks", obj{"revision": p.Revision, "status": "applied"})
@@ -436,11 +371,8 @@ func cmdManaged(args []string) error {
 	if version != expectedVersion {
 		return errors.New("managed binary version does not match the pinned release")
 	}
-	key := make([]byte, 32)
-	if _, err = rand.Read(key); err != nil {
-		return err
-	}
-	a := &managedAgent{config: cfg, runtime: NewRuntime(roleRelay), identities: map[string]managedIdentity{}, serverToken: hex.EncodeToString(key), client: &http.Client{Timeout: 12 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+
+	a := &managedAgent{config: cfg, runtime: newManagedDataPlane(cfg), identities: map[string]managedIdentity{}, client: &http.Client{Timeout: 12 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return err
