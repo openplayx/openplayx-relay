@@ -283,7 +283,7 @@ func TestFirstFailedApplyStopsComponents(t *testing.T) {
 func TestComponentCheckRejectsInvalidTLSMaterial(t *testing.T) {
 	forRoles(t, func(t *testing.T, f *fixture) {
 		name := "tls/frps.key"
-		if f.store.role == roleHome {
+		if f.store.role == roleConnector {
 			name = "tls/ca.crt"
 		}
 		writeFile(t, f.store.file(name), []byte("test fixture only"))
@@ -301,7 +301,7 @@ func TestPreviousRuntimeSecretsSurviveMultiplePendingRotations(t *testing.T) {
 			t.Fatal(err)
 		}
 		owner := "frps"
-		if f.store.role == roleHome {
+		if f.store.role == roleConnector {
 			owner = "frpc"
 		}
 		oldRef := section(f.saved, owner, "auth")["token"].(string)
@@ -415,7 +415,7 @@ func TestRouteRulesStayWithinFRPSPorts(t *testing.T) {
 }
 
 func TestBootstrapExpiry(t *testing.T) {
-	f := newFixture(t, roleHome)
+	f := newFixture(t, roleConnector)
 	now := 1000.0
 	admin := NewAdmin(f.store.dir)
 	admin.now = func() float64 { return now }
@@ -452,10 +452,10 @@ func TestPairingRoleCredentialsAndNoOverwrite(t *testing.T) {
 	}
 	paired := options.Output
 	cfg, _ := readObj(filepath.Join(paired, "relay/relay.json"))
-	home, _ := readObj(filepath.Join(paired, "home/home.json"))
+	home, _ := readObj(filepath.Join(paired, "connector/connector.json"))
 	app, _ := readObj(filepath.Join(paired, "app.json"))
 	relaySecrets, _ := readObj(filepath.Join(paired, "relay/secrets.json"))
-	homeSecrets, _ := readObj(filepath.Join(paired, "home/secrets.json"))
+	homeSecrets, _ := readObj(filepath.Join(paired, "connector/secrets.json"))
 	users := map[string]any{}
 	for _, item := range section(cfg, "singBox", "inbound")["users"].([]any) {
 		users[item.(obj)["name"].(string)] = relaySecrets[item.(obj)["uuid"].(string)]
@@ -478,7 +478,7 @@ func TestPairingRoleCredentialsAndNoOverwrite(t *testing.T) {
 			t.Fatal("home received app uuid")
 		}
 	}
-	if exists(filepath.Join(paired, "home/tls/frps.key")) || exists(filepath.Join(paired, "frps.key")) {
+	if exists(filepath.Join(paired, "connector/tls/frps.key")) || exists(filepath.Join(paired, "frps.key")) {
 		t.Fatal("frps key left outside relay/")
 	}
 	if canonical(app["proxies"]) != `[{"name":"jellyfin","remotePort":18096}]` || len(app) != 2 {
@@ -645,7 +645,7 @@ func TestStaticAssetsAndHeaders(t *testing.T) {
 }
 
 func TestHomeLANDefaultAndOnlyRealDestinationIP(t *testing.T) {
-	store, _ := NewStore(t.TempDir(), roleHome)
+	store, _ := NewStore(t.TempDir(), roleConnector)
 	management := store.blank()["management"].(obj)
 	if management["listen"] != "0.0.0.0" || canonical(management["port"]) != "9080" {
 		t.Fatal("home default must be LAN on 9080")
@@ -686,7 +686,7 @@ func TestHomeLANDefaultAndOnlyRealDestinationIP(t *testing.T) {
 }
 
 func TestHomeIPLoginKeepsAuthenticationCSRFAndExactOrigin(t *testing.T) {
-	store, _ := NewStore(t.TempDir(), roleHome)
+	store, _ := NewStore(t.TempDir(), roleConnector)
 	management := store.blank()["management"].(obj)
 	management["allowedHosts"] = []any{"configured-only.example"}
 	server := startServer(t, store, management, "0.0.0.0:0")
@@ -730,7 +730,7 @@ func TestHomeIPLoginKeepsAuthenticationCSRFAndExactOrigin(t *testing.T) {
 }
 
 func TestExistingLoopbackConfigurationRequiresExplicitRevisionedMigration(t *testing.T) {
-	f := newFixture(t, roleHome)
+	f := newFixture(t, roleConnector)
 	cfg := cloneObj(f.saved)
 	cfg["management"].(obj)["listen"] = "127.0.0.1"
 	initial, err := f.store.save(cfg, 1, nil)
@@ -788,7 +788,7 @@ func TestPublicFrontendValidation(t *testing.T) {
 	}
 	_ = os.Remove(f.store.file("admin.json"))
 	expectCode(t, f.store.validateManagement(cfg["management"]), "adminRequired")
-	home := newFixture(t, roleHome)
+	home := newFixture(t, roleConnector)
 	management := cloneObj(home.saved["management"].(obj))
 	management["frontend"] = obj{"listen": "192.168.1.2", "port": 443}
 	expectCode(t, home.store.validateManagement(management), "invalidFrontend")

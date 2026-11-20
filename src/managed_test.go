@@ -164,7 +164,7 @@ func TestManagedVLESSFRPRetainsAppliedPolicy(t *testing.T) {
 	proxyPort, _ := strconv.Atoi(proxyNumber)
 	control, socks := 7000, freePort(t)
 	root := t.TempDir()
-	home, _ := NewStore(root, roleHome)
+	home, _ := NewStore(root, roleConnector)
 	writeFile(t, home.file("tls/ca.crt"), certificate)
 	draft := home.blank()
 	section(draft, "singBox", "inbound")["listen_port"] = socks
@@ -180,7 +180,7 @@ func TestManagedVLESSFRPRetainsAppliedPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	homeRuntime := NewRuntime(roleHome)
+	homeRuntime := NewRuntime(roleConnector)
 	if _, err = home.apply(saved["revision"], homeRuntime); err != nil {
 		t.Fatal(err)
 	}

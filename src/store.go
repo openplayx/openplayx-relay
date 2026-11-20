@@ -21,8 +21,8 @@ import (
 )
 
 const (
-	roleRelay = "relay"
-	roleHome  = "home"
+	roleRelay     = "relay"
+	roleConnector = "connector"
 )
 
 // Controller switches the running sing-box/frp components. The in-process
@@ -46,7 +46,7 @@ type Store struct {
 }
 
 func NewStore(directory, role string) (*Store, error) {
-	if role != roleRelay && role != roleHome {
+	if role != roleRelay && role != roleConnector {
 		return nil, fmt.Errorf("unknown role %q", role)
 	}
 	absolute, err := filepath.Abs(directory)
@@ -222,9 +222,9 @@ func (s *Store) validateManagement(value any) error {
 			return cfgErr("httpsRequired", "启用公网入口时管理页必须开启 HTTPS。")
 		}
 	}
-	if s.role == roleHome {
+	if s.role == roleConnector {
 		if !(listen.IsUnspecified() || isLANAddress(listenText)) {
-			return cfgErr("lanOnly", "Home 管理页仅允许回环或家庭局域网监听。")
+			return cfgErr("lanOnly", "Connector 管理页仅允许回环或家庭局域网监听。")
 		}
 	} else if !listen.Unmap().IsLoopback() {
 		if !exists(s.file("admin.json")) {
@@ -414,7 +414,7 @@ func (s *Store) test(value, updates any) (obj, error) {
 	// Connect to only this explicitly configured proxy endpoint; no credentials
 	// or media requests are sent and no production component is restarted.
 	var reachable any
-	if s.role == roleHome {
+	if s.role == roleConnector {
 		outbound := section(cfg, "singBox", "outbound")
 		proxyPort, _ := port(outbound["server_port"])
 		connection, err := net.DialTimeout("tcp", net.JoinHostPort(stringValue(outbound["server"]), strconv.Itoa(proxyPort)), 2*time.Second)
@@ -595,8 +595,8 @@ func (s *Store) apply(expectedValue any, controller Controller) (obj, error) {
 }
 
 func (s *Store) enableLAN() (obj, error) {
-	if s.role != roleHome {
-		return nil, cfgErr("homeOnly", "局域网直连选项仅用于 Home。")
+	if s.role != roleConnector {
+		return nil, cfgErr("homeOnly", "局域网直连选项仅用于 Connector。")
 	}
 	cfg, err := s.load()
 	if err != nil {

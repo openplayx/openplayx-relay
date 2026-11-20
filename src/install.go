@@ -23,7 +23,7 @@ func serviceInstalled() bool { return runtime.GOOS == "linux" && exists(unitPath
 
 // Units of the previous Python deployment, migrated away by install.
 func legacyUnits() []string {
-	frp := map[string]string{roleRelay: "frps", roleHome: "frpc"}[role]
+	frp := map[string]string{roleRelay: "frps", roleConnector: "frpc"}[role]
 	return []string{"openplayx-" + role + "-manager.service", "openplayx-" + role + "-sing-box.service", "openplayx-" + role + "-" + frp + ".service"}
 }
 
@@ -43,7 +43,7 @@ func requireRootLinux() error {
 func installFlags(name string) (*string, *string, *bool, []string) {
 	flags, directory := newFlags(name)
 	prefix := flags.String("prefix", "/opt/openplayx-"+role, "installation prefix for binary releases")
-	enableLAN := flags.Bool("enable-lan", false, "Home only: migrate an existing loopback configuration to LAN access")
+	enableLAN := flags.Bool("enable-lan", false, "Connector only: migrate an existing loopback configuration to LAN access")
 	_ = flags.Parse(os.Args[2:])
 	return directory, prefix, enableLAN, flags.Args()
 }
@@ -76,7 +76,7 @@ CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target
-`, role, binaryName(), prefix, map[string]string{roleRelay: "frps", roleHome: "frpc"}[role], directory)
+`, role, binaryName(), prefix, map[string]string{roleRelay: "frps", roleConnector: "frpc"}[role], directory)
 }
 
 // ensureAccount creates the dedicated system account the service runs as.
@@ -180,8 +180,8 @@ func waitActive() error {
 
 func cmdInstall(_ []string) error {
 	directoryFlag, prefixFlag, enableLAN, _ := installFlags(os.Args[1])
-	if *enableLAN && role != roleHome {
-		return errors.New("--enable-lan is only supported by Home")
+	if *enableLAN && role != roleConnector {
+		return errors.New("--enable-lan is only supported by Connector")
 	}
 	if err := requireRootLinux(); err != nil {
 		return err

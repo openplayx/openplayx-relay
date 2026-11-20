@@ -39,11 +39,11 @@ func cmdPair(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("Created relay/, home/ and app.json in", root)
+	fmt.Println("Created relay/, connector/ and app.json in", root)
 	return nil
 }
 
-// selfSignedFRPS creates the dedicated frps server identity that Home pins as
+// selfSignedFRPS creates the dedicated frps server identity that Connector pins as
 // its trust anchor. Proxy TLS uses the supplied certificate, never this one.
 func selfSignedFRPS() ([]byte, []byte, error) {
 	key, err := rsa.GenerateKey(rand.Reader, 3072)
@@ -78,7 +78,7 @@ func newUUID() string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", value[0:4], value[4:6], value[6:8], value[8:10], value[10:16])
 }
 
-// pair creates one household's relay/ and home/ state directories and the
+// pair creates one household's relay/ and connector/ state directories and the
 // App file (a sing-box outbound plus the frpc proxies it may use). It refuses
 // an existing output directory so credentials are never rotated implicitly.
 func pair(options pairOptions) (string, error) {
@@ -135,8 +135,8 @@ func pair(options pairOptions) (string, error) {
 		return "", err
 	}
 
-	// Home never receives the App identity or Relay private keys.
-	home, err := NewStore(filepath.Join(root, roleHome), roleHome)
+	// Connector never receives the App identity or Relay private keys.
+	home, err := NewStore(filepath.Join(root, roleConnector), roleConnector)
 	if err != nil {
 		return "", err
 	}

@@ -1,6 +1,6 @@
-// Command openplayx-relay / openplayx-home is a single Go service: the Web
+// Command openplayx-relay / openplayx-connector is a single Go service: the Web
 // configuration manager plus embedded sing-box and frp (frps on Relay, frpc
-// on Home). No Python runtime or separately downloaded proxy binaries.
+// on Connector). No Python runtime or separately downloaded proxy binaries.
 package main
 
 import (
@@ -48,9 +48,9 @@ Commands:
   check            validate the saved configuration with the embedded upstream checks
   render           write derived sing-box/%[5]s configuration for inspection
   renew-bootstrap  issue a new 15 minute local bootstrap credential
-`, binaryName(), version, singBoxVersion, frpVersion, map[string]string{roleRelay: "frps", roleHome: "frpc"}[role])
+`, binaryName(), version, singBoxVersion, frpVersion, map[string]string{roleRelay: "frps", roleConnector: "frpc"}[role])
 	if role == roleRelay {
-		fmt.Fprintln(os.Stderr, "  pair             create relay/, home/ and app.json for a new deployment")
+		fmt.Fprintln(os.Stderr, "  pair             create relay/, connector/ and app.json for a new deployment")
 	} else {
 		fmt.Fprintln(os.Stderr, "  enable-lan       save LAN management access for an existing configuration")
 	}
@@ -152,7 +152,7 @@ func cmdServe(args []string) error {
 			return nil, err
 		}
 		management := cfg["management"].(obj)
-		if role == roleHome {
+		if role == roleConnector {
 			return management, store.validateManagement(management)
 		}
 		_, _, public := frontendEndpoint(management)
@@ -184,8 +184,8 @@ func cmdServe(args []string) error {
 	store.writeRuntimeState(nil, runtime.Components())
 	listenPort, _ := port(management["port"])
 	fmt.Printf("OpenPlayX %s manager: %s://%s:%d\n", role, server.scheme, management["listen"], listenPort)
-	if role == roleHome && (management["listen"] == "0.0.0.0" || management["listen"] == "::") {
-		fmt.Printf("LAN access: %s://<Home LAN IP>:%d\n", server.scheme, listenPort)
+	if role == roleConnector && (management["listen"] == "0.0.0.0" || management["listen"] == "::") {
+		fmt.Printf("LAN access: %s://<Connector LAN IP>:%d\n", server.scheme, listenPort)
 	}
 	if exists(store.file("bootstrap-token")) {
 		fmt.Println("Read local bootstrap-token in the private config directory to sign in (15 minute expiry).")
@@ -355,6 +355,6 @@ func cmdEnableLAN(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("Saved Home LAN management access on port", cfg["management"].(obj)["port"], "; restart the service to use it.")
+	fmt.Println("Saved Connector LAN management access on port", cfg["management"].(obj)["port"], "; restart the service to use it.")
 	return nil
 }

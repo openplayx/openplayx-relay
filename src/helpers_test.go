@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-var roles = []string{roleRelay, roleHome}
+var roles = []string{roleRelay, roleConnector}
 
 // testCertificate returns a PEM certificate and unencrypted key for localhost.
 func testCertificate(t *testing.T) ([]byte, []byte) {

@@ -52,7 +52,7 @@ func TestManagedHotUpdatesPreserveLiveStreamsAndRevokeOnlyAffectedRoutes(t *test
 		}
 	}()
 	root := t.TempDir()
-	home, _ := NewStore(root, roleHome)
+	home, _ := NewStore(root, roleConnector)
 	writeFile(t, home.file("tls/ca.crt"), certificate)
 	draft := home.blank()
 	section(draft, "singBox", "inbound")["listen_port"] = freePort(t)
@@ -76,7 +76,7 @@ func TestManagedHotUpdatesPreserveLiveStreamsAndRevokeOnlyAffectedRoutes(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	homeRuntime := NewRuntime(roleHome)
+	homeRuntime := NewRuntime(roleConnector)
 	if _, err = home.apply(saved["revision"], homeRuntime); err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestManagedHotUpdatesPreserveLiveStreamsAndRevokeOnlyAffectedRoutes(t *test
 	if a.runtime.listener != initialListener || a.runtime.servers["connector_a"] != initialFRPS {
 		t.Fatal("service registration restarted stable components")
 	}
-	// Native Home/frpc reload adds only B, retaining A and its existing work conn.
+	// Native Connector/frpc reload adds only B, retaining A and its existing work conn.
 	section(saved, "frpc")["proxies"] = []any{
 		obj{"name": "service_a", "type": "tcp", "localIP": "127.0.0.1", "localPort": echo.Addr().(*net.TCPAddr).Port, "remotePort": portA},
 		obj{"name": "service_b", "type": "tcp", "localIP": "127.0.0.1", "localPort": echo.Addr().(*net.TCPAddr).Port, "remotePort": portB},

@@ -15,8 +15,8 @@ import (
 	box "github.com/sagernet/sing-box"
 )
 
-// Runtime hosts sing-box and frps (Relay) or sing-box and frpc (Home) inside
-// this process. Home starts frpc only after its loopback SOCKS5 entry answers
+// Runtime hosts sing-box and frps (Relay) or sing-box and frpc (Connector) inside
+// this process. Connector starts frpc only after its loopback SOCKS5 entry answers
 // a handshake, and frpc always dials through it: there is no direct mode.
 type Runtime struct {
 	mu              sync.Mutex
@@ -120,7 +120,7 @@ func initializeFRPLogging(level string) {
 func (r *Runtime) startLocked(plan *Plan) error {
 	initializeFRPLogging(plan.LogLevel)
 	attempts := 1
-	if r.role == roleHome {
+	if r.role == roleConnector {
 		attempts = 3
 	}
 	var err error

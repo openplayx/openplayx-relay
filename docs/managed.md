@@ -21,7 +21,7 @@ New handshakes revalidate their authenticated identity and destination against t
 
 ## Verification
 
-Run `cd src && go test ./...`, `go vet ./...`, and `go test -race ./...`. Real tests use native sing-box App/Home clients and frp with a continuously transmitting TCP stream while registering services/devices/accounts, revoking grants, deleting a service and rotating a device UUID. They verify listener/control identity retention, targeted disconnects and immediate service-port release.
+Run `cd src && go test ./...`, `go vet ./...`, and `go test -race ./...`. Real tests use native sing-box App/Connector clients and frp with a continuously transmitting TCP stream while registering services/devices/accounts, revoking grants, deleting a service and rotating a device UUID. They verify listener/control identity retention, targeted disconnects and immediate service-port release.
 
 The pinned frp source and narrow update/concurrency patches are in `src/third_party/`; see its README and retained Apache-2.0 notices. The previously observed channel and control-pointer races have local fixes; the current full race suite passes. This does not imply that every upstream behavior has been audited.
 

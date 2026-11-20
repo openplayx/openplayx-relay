@@ -4,7 +4,7 @@
 
 [![License: GPL v3+](https://img.shields.io/badge/license-GPLv3%2B-blue.svg)](COPYING)
 
-[OpenPlayX](https://github.com/openplayx/openplayx) 远程访问的 VPS 端服务：一个 Go 程序，内含 Web 配置管理、**sing-box 1.12.12**（VLESS + TLS 入口）和 **frps 0.65.0**。家庭端见 [openplayx-home](https://github.com/openplayx/openplayx-home)。App 不需要安装外部代理客户端，就能访问家里的媒体服务（Jellyfin、Emby、SMB 等）。
+[OpenPlayX](https://github.com/openplayx/openplayx) 远程访问的 VPS 端服务：一个 Go 程序，内含 Web 配置管理、**sing-box 1.12.12**（VLESS + TLS 入口）和 **frps 0.65.0**。家庭端见 [openplayx-connector](https://github.com/openplayx/openplayx-connector)。App 不需要安装外部代理客户端，就能访问家里的媒体服务（Jellyfin、Emby、SMB 等）。
 
 ```text
 App（内置 sing-box）
@@ -24,7 +24,7 @@ App（内置 sing-box）
 
 ## 构建
 
-需要 Go 1.24+。Go 源码、模块文件和内嵌的 Web 页面（`src/web/`）都在 `src/` 下；除 `src/role.go` 外，Relay 与 Home 两个仓库的 `src/` 内容相同。
+需要 Go 1.24+。Go 源码、模块文件和内嵌的 Web 页面（`src/web/`）都在 `src/` 下；除 `src/role.go` 外，Relay 与 Connector 两个仓库的 `src/` 内容相同。
 
 ```bash
 scripts/build.sh                       # dist/openplayx-relay-linux-{amd64,arm64} + SHA256SUMS
@@ -54,7 +54,7 @@ sudo openplayx-relay status
 
 配对文件都包含凭据，须通过可信渠道分别传递：
 
-- 整个 `secrets/home/` 目录交给家庭端；其中只有 Home 配置、Home 专属机密和 frps 公共证书，不包含 Relay 私钥或 App UUID。将目录放到家庭端私有持久目录后，在 Home Web 表单里编辑 `frpc.proxies`（家庭目标地址、端口与 `remotePort`）。
+- 整个 `secrets/connector/` 目录交给家庭端；其中只有 Connector 配置、Connector 专属机密和 frps 公共证书，不包含 Relay 私钥或 App UUID。将目录放到家庭端私有持久目录后，在 Connector Web 表单里编辑 `frpc.proxies`（家庭目标地址、端口与 `remotePort`）。
 - `secrets/app.json` 交给 App：一个 sing-box `outbound`（App user 的 UUID）加上可用的 `proxies: [{name, remotePort}]`。
 - `secrets/relay/` 目录及代理私钥只保留在 VPS；实际密钥位于该目录的 secrets.json 与 tls/ 资产中。
 
@@ -62,16 +62,16 @@ sudo openplayx-relay status
 
 配置分两层（字段沿用 sing-box / frp，详见 [docs/configuration.zh-CN.md](docs/configuration.zh-CN.md)）：
 
-- **网络层（sing-box）**：Relay 的 `singBox.inbound.users` 为每台 Home、每个 App 设备各分配一个 user；`singBox.route.rules` 用 `auth_user` + `port`/`port_range` 决定每个 user 能访问 Relay 回环上的哪些端口（Home 访问 `frps.bindPort`，App 访问映射端口），其余一律拒绝。
-- **注册层（frp）**：Home 的 `frpc.proxies` 声明要映射的服务及 `remotePort`；Relay 只用 `frps.allowPorts` 划定可注册的端口范围（默认 18000–18999），不需要预先知道服务列表。
+- **网络层（sing-box）**：Relay 的 `singBox.inbound.users` 为每台 Connector、每个 App 设备各分配一个 user；`singBox.route.rules` 用 `auth_user` + `port`/`port_range` 决定每个 user 能访问 Relay 回环上的哪些端口（Connector 访问 `frps.bindPort`，App 访问映射端口），其余一律拒绝。
+- **注册层（frp）**：Connector 的 `frpc.proxies` 声明要映射的服务及 `remotePort`；Relay 只用 `frps.allowPorts` 划定可注册的端口范围（默认 18000–18999），不需要预先知道服务列表。
 
-增加家庭服务时只改 Home 的 `frpc.proxies`（端口在 `allowPorts` 内）；增加 App 设备时在 Relay 添加 user 并加入相应 route rule，把该 user 的 outbound 交给设备。当前一组 Relay 配置服务一个家庭，frp token 不提供跨家庭的映射归属控制；多家庭应使用独立实例。
+增加家庭服务时只改 Connector 的 `frpc.proxies`（端口在 `allowPorts` 内）；增加 App 设备时在 Relay 添加 user 并加入相应 route rule，把该 user 的 outbound 交给设备。当前一组 Relay 配置服务一个家庭，frp token 不提供跨家庭的映射归属控制；多家庭应使用独立实例。
 
 当前为 `schemaVersion: 2`（sing-box / frp 字段）。旧格式（`homeId`、`services`、`proxy`/`frp` 段）不再读取，也不提供自动导入；`install` 只替换二进制，不转换配置。
 
 ## Web 配置管理
 
-页面分为“传输链路”和“可用服务”两部分，默认展示已保存配置，展开对应区域可修改。Home 管理实际服务映射；Relay 管理允许注册的端口范围与身份访问权限。证书、日志和管理入口收在链路维护选项中。修改后在页面顶部保存，再应用已保存配置。
+页面分为“传输链路”和“可用服务”两部分，默认展示已保存配置，展开对应区域可修改。Connector 管理实际服务映射；Relay 管理允许注册的端口范围与身份访问权限。证书、日志和管理入口收在链路维护选项中。修改后在页面顶部保存，再应用已保存配置。
 
 权威配置为 `relay.json`，实际 UUID/token 仅存于私有 `secrets.json`。默认管理页为 `http://127.0.0.1:9081`，推荐从本机或 SSH 端口转发访问。配置结构、启动、权限与验证说明见 [docs/configuration.zh-CN.md](docs/configuration.zh-CN.md)。
 

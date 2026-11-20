@@ -23,7 +23,7 @@ Thanks for your interest. Bug reports, fixes and small improvements are welcome.
    (cd src && go test -short ./...)   # quick run, skips the end-to-end test
    ```
 
-4. `src/` is shared with [openplayx-home](https://github.com/openplayx/openplayx-home): apart from
+4. `src/` is shared with [openplayx-connector](https://github.com/openplayx/openplayx-connector): apart from
    `src/role.go`, both repositories must stay identical. Make the same change
    in both, and say so in the pull request.
 5. Update the README in both languages (`README.md` and `README.zh-CN.md`)

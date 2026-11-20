@@ -19,7 +19,7 @@ type session struct {
 }
 
 // Admin handles the local administrator identity, which is independent of
-// the App, Home and frp credentials. Parameters match the stored admin.json.
+// the App, Connector and frp credentials. Parameters match the stored admin.json.
 type Admin struct {
 	dir      string
 	now      func() float64

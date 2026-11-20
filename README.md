@@ -7,7 +7,7 @@ English | [简体中文](README.zh-CN.md)
 The VPS side of [OpenPlayX](https://github.com/openplayx/openplayx) remote
 access: one Go program with a web configuration manager, **sing-box 1.12.12**
 (VLESS + TLS ingress) and **frps 0.65.0**. The home side is
-[openplayx-home](https://github.com/openplayx/openplayx-home). The app reaches
+[openplayx-connector](https://github.com/openplayx/openplayx-connector). The app reaches
 media services at home (Jellyfin, Emby, SMB, …) without installing an external
 proxy client.
 
@@ -41,7 +41,7 @@ links, is not guaranteed.
 
 Requires Go 1.24+. The Go sources, module files and the embedded web page
 (`src/web/`) are under `src/`; apart from `src/role.go`, `src/` is identical in
-the Relay and Home repositories.
+the Relay and Connector repositories.
 
 ```bash
 scripts/build.sh                       # dist/openplayx-relay-linux-{amd64,arm64} + SHA256SUMS
@@ -82,11 +82,11 @@ page's **Apply** button does the same after saving.
 All pairing files contain credentials. Hand each one over through a trusted
 channel:
 
-- The whole `secrets/home/` directory goes to the home side. It holds only the
-  Home configuration, Home-only secrets and the frps public certificate, no
+- The whole `secrets/connector/` directory goes to the home side. It holds only the
+  Connector configuration, Connector-only secrets and the frps public certificate, no
   Relay private keys and no app UUIDs. Put it into the home side's private
   state directory, then edit `frpc.proxies` (home target address, port and
-  `remotePort`) in the Home web form.
+  `remotePort`) in the Connector web form.
 - `secrets/app.json` goes to the app: one sing-box `outbound` (the app user's
   UUID) plus the usable `proxies: [{name, remotePort}]`.
 - `secrets/relay/` and the proxy private key stay on the VPS; the actual keys
@@ -98,16 +98,16 @@ Two layers, using sing-box / frp field names (details in
 [docs/configuration.md](docs/configuration.md)):
 
 - **Network layer (sing-box)**: the Relay's `singBox.inbound.users` gives every
-  Home and every app device its own user; `singBox.route.rules` uses
+  Connector and every app device its own user; `singBox.route.rules` uses
   `auth_user` + `port`/`port_range` to decide which loopback ports on the Relay
-  each user may reach (Home: `frps.bindPort`; apps: the mapping ports).
+  each user may reach (Connector: `frps.bindPort`; apps: the mapping ports).
   Everything else is rejected.
-- **Registration layer (frp)**: the Home's `frpc.proxies` declares the services
+- **Registration layer (frp)**: the Connector's `frpc.proxies` declares the services
   to map and their `remotePort`; the Relay only limits which ports may be
   registered with `frps.allowPorts` (default 18000–18999) and does not need to
   know the service list.
 
-To add a home service, change only the Home's `frpc.proxies` (port inside
+To add a home service, change only the Connector's `frpc.proxies` (port inside
 `allowPorts`). To add an app device, add a user on the Relay with a matching
 route rule and give that user's outbound to the device. One Relay
 configuration serves one home: the frp token does not separate mappings
@@ -121,7 +121,7 @@ convert configuration.
 ## Web configuration
 
 The page has two parts, **transport link** and **available services**. It shows
-the saved configuration; expand a section to edit it. The Home manages the
+the saved configuration; expand a section to edit it. The Connector manages the
 actual service mappings; the Relay manages the registrable port range and
 identity permissions. Certificates, logs and admin access are under the link
 maintenance options. Save at the top of the page, then apply the saved

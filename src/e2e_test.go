@@ -111,9 +111,9 @@ func (a *appClient) controlTLS(port int, roots *x509.CertPool) error {
 	return tls.Client(connection, &tls.Config{RootCAs: roots, ServerName: "localhost"}).Handshake()
 }
 
-// TestEndToEnd runs Relay and Home in-process with the embedded sing-box and
-// frp: real TLS/VLESS, frpc through the Home SOCKS entry, authenticated Range
-// media, account separation, and no direct fallback once Home's proxy stops.
+// TestEndToEnd runs Relay and Connector in-process with the embedded sing-box and
+// frp: real TLS/VLESS, frpc through the Connector SOCKS entry, authenticated Range
+// media, account separation, and no direct fallback once Connector's proxy stops.
 func TestEndToEnd(t *testing.T) {
 	if testing.Short() {
 		t.Skip("end-to-end test")
@@ -140,7 +140,7 @@ func TestEndToEnd(t *testing.T) {
 	appUUID, homeUUID := newUUID(), newUUID()
 	token := repeat("integration-test-token-", 3)
 	relayStore, _ := NewStore(filepath.Join(root, "relay-state"), roleRelay)
-	homeStore, _ := NewStore(filepath.Join(root, "home-state"), roleHome)
+	homeStore, _ := NewStore(filepath.Join(root, "home-state"), roleConnector)
 	for name, data := range map[string][]byte{"tls.crt": certificate, "tls.key": key} {
 		writeFile(t, relayStore.file("tls/"+name), data)
 	}
@@ -181,7 +181,7 @@ func TestEndToEnd(t *testing.T) {
 			t.Fatal("identity stored in authoritative JSON")
 		}
 	}
-	relayRuntime, homeRuntime := NewRuntime(roleRelay), NewRuntime(roleHome)
+	relayRuntime, homeRuntime := NewRuntime(roleRelay), NewRuntime(roleConnector)
 	if _, err = relayStore.apply(relayCfg["revision"], relayRuntime); err != nil {
 		t.Fatal(err)
 	}

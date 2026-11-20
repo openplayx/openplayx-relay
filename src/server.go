@@ -29,7 +29,7 @@ var staticFiles = map[string][2]string{
 
 const contentSecurityPolicy = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 
-// ManagerServer is the role-scoped configuration API. Home permits
+// ManagerServer is the role-scoped configuration API. Connector permits
 // authenticated LAN access; Relay stays loopback unless HTTPS is configured.
 type ManagerServer struct {
 	store      *Store
@@ -84,7 +84,7 @@ func NewManagerServer(store *Store, management obj, address string) (*ManagerSer
 	m.listener = listener
 	m.server = &http.Server{
 		Handler: m, ReadTimeout: 10 * time.Second, ReadHeaderTimeout: 10 * time.Second,
-		// Apply waits for components (Home: SOCKS readiness and retries), so
+		// Apply waits for components (Connector: SOCKS readiness and retries), so
 		// responses may take longer than a single read or write.
 		WriteTimeout: 3 * time.Minute, IdleTimeout: 10 * time.Second,
 		ErrorLog: discardLogger(), MaxHeaderBytes: 65536,
@@ -141,11 +141,11 @@ func (m *ManagerServer) origins() map[string]bool {
 
 func (m *ManagerServer) requestOrigins(peer, local, authority string) (map[string]bool, error) {
 	origins := m.origins()
-	if m.store.role != roleHome {
+	if m.store.role != roleConnector {
 		return origins, nil
 	}
 	if !isLANAddress(peer) || !isLANAddress(local) {
-		return nil, cfgErr("lanOnly", "Home 管理页只允许家庭局域网访问。", 403)
+		return nil, cfgErr("lanOnly", "Connector 管理页只允许家庭局域网访问。", 403)
 	}
 	// Accept a literal IP only when it is the actual destination interface of
 	// this connection. Never allow arbitrary Host values or LAN wildcards.
@@ -220,7 +220,7 @@ func (m *ManagerServer) checkOrigin(r *http.Request, write bool) error {
 	}
 	if len(values) > 0 {
 		origin := values[0]
-		if !origins[origin] || (m.store.role == roleHome && origin != authority) {
+		if !origins[origin] || (m.store.role == roleConnector && origin != authority) {
 			return cfgErr("originDenied", "请求来源不允许。", 403)
 		}
 	}

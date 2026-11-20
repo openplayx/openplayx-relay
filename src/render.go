@@ -41,7 +41,7 @@ type Plan struct {
 	secrets      obj
 }
 
-// homeRetry is the delay between Home sing-box start attempts.
+// homeRetry is the delay between Connector sing-box start attempts.
 const homeRetry = 5 * time.Second
 
 func (s *Store) plan(cfg obj, values obj) (*Plan, error) {

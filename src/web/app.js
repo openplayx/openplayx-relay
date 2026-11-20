@@ -94,7 +94,7 @@ function secretInput(placeholder, generate) {
   return {wrap, element};
 }
 
-// secretField is a fixed credential (Home uuid, frp token).
+// secretField is a fixed credential (Connector uuid, frp token).
 function secretField(parent, key, label, generate = false) {
   const wrap = document.createElement('div');
   const title = document.createElement('label');
@@ -179,10 +179,10 @@ function renderOverview() {
   const transport = $('transport-summary'), services = $('services-summary');
   transport.replaceChildren(); services.replaceChildren();
   $('transport-note').textContent = relay
-    ? 'Home 与 App → Relay 加密入口 → 服务注册与转发'
-    : '家庭服务 → Home → 加密连接 → Relay';
+    ? 'Connector 与 App → Relay 加密入口 → 服务注册与转发'
+    : '家庭服务 → Connector → 加密连接 → Relay';
   $('services-note').textContent = relay
-    ? '此端管理服务端口范围与访问权限。实际家庭服务列表在 Home 配置。'
+    ? '此端管理服务端口范围与访问权限。实际家庭服务列表在 Connector 配置。'
     : 'App 通过 Relay 的映射端口访问这些家庭服务。';
   $('management-note').textContent = relay
     ? '公网访问须使用 HTTPS 和管理员认证。管理页可与加密连接共用 443 端口。修改管理入口后需要在机器上重启管理服务。'
@@ -230,7 +230,7 @@ function render(data) {
   $('users-block').hidden = $('rules-block').hidden = !relay;
 
   if (relay) {
-    $('singbox-note').textContent = 'Home 和 App 通过此加密入口连接 Relay。';
+    $('singbox-note').textContent = 'Connector 和 App 通过此加密入口连接 Relay。';
     field('singbox-fields', 'singBox.inbound.listen', '监听地址');
     field('singbox-fields', 'singBox.inbound.listen_port', '加密连接端口', 'number');
     field('singbox-fields', 'singBox.inbound.tls.server_name', 'TLS 服务器名称');
@@ -240,13 +240,13 @@ function render(data) {
     for (const rule of config.singBox.route.rules) ruleRow(rule);
 
     $('frp-title').textContent = '服务注册入口';
-    $('frp-note').textContent = '接收 Home 的服务注册，仅监听本机回环，并验证加密连接。';
+    $('frp-note').textContent = '接收 Connector 的服务注册，仅监听本机回环，并验证加密连接。';
     field('frp-fields', 'frps.bindPort', '服务注册控制端口', 'number');
     tlsField('frp-fields', 'frps.transport.tls.certFile', '注册连接证书');
     tlsField('frp-fields', 'frps.transport.tls.keyFile', '注册连接私钥');
     secretField('frp-secrets', 'token', '服务注册凭据（至少 32 字符）');
     $('frp-list-title').textContent = '允许注册的映射端口';
-    $('frp-list-note').textContent = '允许 Home 注册的端口范围；单个端口不填结束端口。';
+    $('frp-list-note').textContent = '允许 Connector 注册的端口范围；单个端口不填结束端口。';
     $('add-frp-item').textContent = '添加端口范围';
     for (const entry of config.frps.allowPorts) allowRow(entry);
   } else {
@@ -257,7 +257,7 @@ function render(data) {
     field('singbox-fields', 'singBox.inbound.listen_port', '本机转发端口（仅回环）', 'number');
     const ca = field('singbox-fields', 'singBox.outbound.tls.certificate', '受信任 CA（可选，公开内容）', 'textarea');
     ca.parentElement.classList.add('wide');
-    secretField('singbox-secrets', 'uuid', 'Home 认证 UUID');
+    secretField('singbox-secrets', 'uuid', 'Connector 认证 UUID');
 
     $('frp-title').textContent = '服务注册连接';
     $('frp-note').textContent = '通过上面的加密链路注册家庭服务，家庭标识用于区分服务名称。';

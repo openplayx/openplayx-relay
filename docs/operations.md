@@ -3,7 +3,7 @@
 English | [简体中文](operations.zh-CN.md)
 
 On the VPS, sing-box and frps run inside the same `openplayx-relay` process; at
-home, sing-box and frpc run inside the same `openplayx-home` process. Both use
+home, sing-box and frpc run inside the same `openplayx-connector` process. Both use
 the host network namespace: 127.0.0.1 in the configuration means the same host,
 so the components cannot be split into containers with separate network
 namespaces.
@@ -27,7 +27,7 @@ frpc always uses `transport.proxyURL` and has no direct mode.
 
 ## Troubleshooting
 
-- `systemctl status openplayx-relay` (home side: `openplayx-home`);
+- `systemctl status openplayx-relay` (home side: `openplayx-connector`);
   `journalctl -u openplayx-relay --since -10min`. Component and manager logs
   share one unit; known secrets are removed from component errors before they
   are written, but still do not publish logs you have not checked.
@@ -58,7 +58,7 @@ frpc always uses `transport.proxyURL` and has no direct mode.
 ## What the tests prove
 
 `go test ./...` under `src/` runs the embedded sing-box and frp in both the
-Relay and Home roles on single-machine loopback. It covers configuration
+Relay and Connector roles on single-machine loopback. It covers configuration
 validation, TLS, VLESS, frpc over SOCKS, media authentication and Range
 responses, and also checks app/home permission isolation, rejection of
 unassigned ports and unknown UUIDs, and that stopping the home sing-box does not
@@ -68,7 +68,7 @@ operation or Linux service management.
 
 Known upstream issue: frpc in frp 0.65.0 has two unsynchronized reads/writes on
 shutdown (visible with `go test -race`, inside frp's own code). They are
-triggered only when the Home applies a new revision or the service stops.
+triggered only when the Connector applies a new revision or the service stops.
 
 Each relay instance currently serves one home, and several services share the
 app identity. Isolating several people or homes needs separate identities and

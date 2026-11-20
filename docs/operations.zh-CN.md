@@ -2,7 +2,7 @@
 
 [English](operations.md) | 简体中文
 
-VPS 上的 sing-box 与 frps 运行在同一个 `openplayx-relay` 进程中；家庭端的 sing-box 与 frpc 运行在同一个 `openplayx-home` 进程中。两端都使用主机网络命名空间，配置中的 127.0.0.1 指同一台主机，不能拆到两个独立网络命名空间的容器。
+VPS 上的 sing-box 与 frps 运行在同一个 `openplayx-relay` 进程中；家庭端的 sing-box 与 frpc 运行在同一个 `openplayx-connector` 进程中。两端都使用主机网络命名空间，配置中的 127.0.0.1 指同一台主机，不能拆到两个独立网络命名空间的容器。
 
 ```text
 App / embedded sing-box
@@ -18,7 +18,7 @@ VPS 仅开放已选代理 TCP 端口。frps 控制端口、媒体映射均回环
 
 ## 故障排查
 
-- `systemctl status openplayx-relay`（家庭端 `openplayx-home`）；`journalctl -u openplayx-relay --since -10min`。组件与管理器日志在同一个单元里；组件错误写入前会去除已知机密，但仍不要公开未经检查的日志。
+- `systemctl status openplayx-relay`（家庭端 `openplayx-connector`）；`journalctl -u openplayx-relay --since -10min`。组件与管理器日志在同一个单元里；组件错误写入前会去除已知机密，但仍不要公开未经检查的日志。
 - `sudo openplayx-relay status` 查看期望/实际修订和 sing-box、frps 组件状态（`active`/`inactive`/`failed`）。
 - `ss -lntp` 确认代理端口、frps 控制及映射地址符合预期。不要将映射改为 0.0.0.0 来规避连接问题。
 - `sudo openplayx-relay check` 用内置校验检查已保存配置；`render --output DIR` 输出派生配置（含凭据，查看后删除）。
@@ -30,8 +30,8 @@ VPS 仅开放已选代理 TCP 端口。frps 控制端口、媒体映射均回环
 
 ## 验证边界
 
-`src/` 下的 `go test ./...` 在单机回环环境中以 Relay、Home 两个角色运行内置的 sing-box 与 frp，覆盖配置校验、TLS、VLESS、frpc 经 SOCKS、媒体认证和 Range 响应；还检查 App/home 权限隔离、未分配端口拒绝、未知 UUID 拒绝、停止家庭 sing-box 后不回退直连。这不等价于中国运营商跨境线路、长期播放、移动后台或 Linux 服务管理验收。
+`src/` 下的 `go test ./...` 在单机回环环境中以 Relay、Connector 两个角色运行内置的 sing-box 与 frp，覆盖配置校验、TLS、VLESS、frpc 经 SOCKS、媒体认证和 Range 响应；还检查 App/home 权限隔离、未分配端口拒绝、未知 UUID 拒绝、停止家庭 sing-box 后不回退直连。这不等价于中国运营商跨境线路、长期播放、移动后台或 Linux 服务管理验收。
 
-已知上游问题：frp 0.65.0 的 frpc 在停止时有两处无锁读写（`go test -race` 可见，位于 frp 自身代码），只在 Home 应用新修订或停止服务时触发。
+已知上游问题：frp 0.65.0 的 frpc 在停止时有两处无锁读写（`go test -race` 可见，位于 frp 自身代码），只在 Connector 应用新修订或停止服务时触发。
 
 每个 relay 实例当前对应一个家庭，多个服务共用 App 身份。需要多人或多家庭隔离时应增加独立身份与 frp 服务端授权机制，不要把共享 token 当作多租户控制。

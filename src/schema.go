@@ -9,7 +9,7 @@ import (
 	"unicode/utf8"
 )
 
-// The authoritative relay.json / home.json reuse sing-box and frp field
+// The authoritative relay.json / connector.json reuse sing-box and frp field
 // names. They are a curated subset: fixed values (protocol types, loopback
 // binds, TLS enforcement) are validated, not freely editable, and every
 // credential is a "secret:..." reference into secrets.json.
@@ -20,7 +20,7 @@ import (
 //	singBox.route.rules  sing-box route rules: auth_user + port / port_range (loopback only, rest rejected)
 //	frps                 frp server: bindPort, auth.token, transport.tls, allowPorts
 //
-// Home (schemaVersion 2):
+// Connector (schemaVersion 2):
 //
 //	singBox.inbound      sing-box SOCKS inbound used only by frpc (loopback)
 //	singBox.outbound     sing-box VLESS outbound to the Relay
@@ -144,7 +144,7 @@ func (s *Store) load() (obj, error) {
 	if plainSecret(cfg) {
 		return nil, cfgErr("plainSecretDenied", "普通配置只能保存机密引用，原文件已保留。", 409)
 	}
-	if s.role == roleHome {
+	if s.role == roleConnector {
 		if ca, _ := cfg["singBox"].(obj)["outbound"].(obj)["tls"].(obj)["certificate"].(string); strings.Contains(ca, "PRIVATE KEY") {
 			return nil, cfgErr("plainSecretDenied", "CA 字段不能包含私钥，原文件已保留。", 409)
 		}
@@ -418,7 +418,7 @@ func (s *Store) validateRelay(cfg obj, values obj) error {
 	}
 	frontendIP, frontendPort, hasFrontend := frontendEndpoint(m)
 	if hasFrontend {
-		// listen_port is the port in Home outbounds and App outbounds, so the
+		// listen_port is the port in Connector outbounds and App outbounds, so the
 		// shared public entry must use it.
 		if frontendPort != proxyPort {
 			return cfgErr("invalidFrontend", "公网入口端口须与 inbound.listen_port 一致。")
@@ -469,7 +469,7 @@ func (s *Store) validateRelay(cfg obj, values obj) error {
 func (s *Store) validateHome(cfg obj, values obj) error {
 	inbound := section(cfg, "singBox", "inbound")
 	if inbound["type"] != "socks" || inbound["tag"] != "socks" || inbound["listen"] != "127.0.0.1" {
-		return cfgErr("mandatoryProxy", "Home 入站固定为仅监听 127.0.0.1 的 sing-box SOCKS（tag socks）。")
+		return cfgErr("mandatoryProxy", "Connector 入站固定为仅监听 127.0.0.1 的 sing-box SOCKS（tag socks）。")
 	}
 	socksPort, err := port(inbound["listen_port"])
 	if err != nil {
@@ -477,7 +477,7 @@ func (s *Store) validateHome(cfg obj, values obj) error {
 	}
 	outbound := section(cfg, "singBox", "outbound")
 	if outbound["type"] != "vless" || outbound["tag"] != "relay" {
-		return cfgErr("invalidProtocol", "Home 出站固定为 sing-box VLESS（tag relay）。")
+		return cfgErr("invalidProtocol", "Connector 出站固定为 sing-box VLESS（tag relay）。")
 	}
 	if _, err = host(outbound["server"]); err != nil {
 		return err

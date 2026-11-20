@@ -13,7 +13,7 @@
 <section id="transport-section"><h2>传输链路</h2><p id="transport-note"></p><dl id="transport-summary" class="summary-grid"></dl>
 <details id="transport-editor"><summary>修改传输链路</summary><div class="editor">
 <h3>加密连接</h3><p id="singbox-note"></p><div id="singbox-fields" class="fields"></div><div id="singbox-secrets" class="fields"></div>
-<div id="users-block" hidden><h3>接入身份</h3><p>Home 与 App 使用各自的身份。UUID 留空保留原值；移除身份将吊销其访问权限。</p><div id="users"></div><button type="button" id="add-user">添加身份</button></div>
+<div id="users-block" hidden><h3>接入身份</h3><p>Connector 与 App 使用各自的身份。UUID 留空保留原值；移除身份将吊销其访问权限。</p><div id="users"></div><button type="button" id="add-user">添加身份</button></div>
 <h3 id="frp-title">服务注册连接</h3><p id="frp-note"></p><div id="frp-fields" class="fields"></div><div id="frp-secrets" class="fields"></div>
 <details class="maintenance"><summary>证书、日志与管理入口</summary><div class="editor"><h3>导入证书文件</h3><p>导入后在对应字段选择，再保存并应用。私钥不会通过读取或导出接口返回。</p><label>文件类型<select id="tls-kind"><option value="certificate">PEM 证书 / CA</option><option value="privateKey">未加密 PEM 私钥</option></select></label><label>选择文件<input id="tls-upload" type="file" accept=".pem,.crt,.key"></label><button id="tls-upload-button" type="button">导入 TLS 文件</button><div id="log-fields" class="fields"></div><h3>Web 管理入口</h3><p id="management-note"></p><div id="management-fields" class="fields"></div></div></details>
 </div></details></section>

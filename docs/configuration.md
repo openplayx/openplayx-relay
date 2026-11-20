@@ -9,7 +9,7 @@ file reads or writes and no raw JSON editor.
 
 ## Files and responsibilities
 
-- `relay.json` / `home.json`: this side's only editable connection
+- `relay.json` / `connector.json`: this side's only editable connection
   configuration, with `schemaVersion: 2` and a monotonically increasing
   `revision`; structure below.
 - `secrets.json`: the actual UUID and frp token values; the normal
@@ -36,7 +36,7 @@ file reads or writes and no raw JSON editor.
   from a damaged file never reuses an old revision.
 
 The state directory defaults to `/var/lib/openplayx-relay/` or
-`/var/lib/openplayx-home/`: directory 0700, configuration/secrets/assets 0600,
+`/var/lib/openplayx-connector/`: directory 0700, configuration/secrets/assets 0600,
 owned by the service account. After CLI commands that change configuration run
 as root, the program restores the owner of the files to the directory's owner.
 
@@ -74,7 +74,7 @@ Relay `relay.json`:
 }
 ```
 
-- `inbound.users`: one user per Home and per app device; deleting a user
+- `inbound.users`: one user per Connector and per app device; deleting a user
   revokes that identity. UUIDs must be unique.
 - `route.rules`: only `auth_user`, `port` and `port_range` are allowed. When the
   runtime configuration is generated, every rule is limited to destination
@@ -83,10 +83,10 @@ Relay `relay.json`:
   `bindPort`, change the rule that allows it too.
 - `frps`: always listens on loopback only and enforces TLS. `allowPorts` uses
   frp's native format (`{"single": n}` or `{"start": a, "end": b}`) and limits
-  the `remotePort`s a Home may register. The Relay does not need to know the
+  the `remotePort`s a Connector may register. The Relay does not need to know the
   service list in advance.
 
-Home `home.json`:
+Connector `connector.json`:
 
 ```json
 {
@@ -123,7 +123,7 @@ sing-box `outbound` (with that app user's UUID) and the subset of frpc proxies
 it may use, `proxies: [{ "name", "remotePort" }]`.
 
 Secret update keys in the web form and API: on the Relay `uuid:<user name>` and
-`token`, on the Home `uuid` and `token`. Leaving a field out keeps the value; an
+`token`, on the Connector `uuid` and `token`. Leaving a field out keeps the value; an
 empty string clears it.
 
 ## Initial setup
@@ -134,8 +134,8 @@ deployments need their configuration rewritten in the structure above, keeping
 the existing `secret:` references.
 
 New deployments use the Relay's `openplayx-relay pair` to generate separate
-`relay/` and `home/` state directories and `app.json` in one step. The home side
-receives only `home/`, which contains no app UUID and no Relay private key.
+`relay/` and `connector/` state directories and `app.json` in one step. The home side
+receives only `connector/`, which contains no app UUID and no Relay private key.
 `app.json` contains real client secrets: hand it over through a trusted channel
 and never publish it as a redacted configuration.
 
@@ -166,13 +166,13 @@ such as ProtectSystem=strict/ProtectHome; it can only write to the state
 directory and keeps only `CAP_NET_BIND_SERVICE`. The API accepts no commands,
 executable paths or arbitrary target file paths.
 
-Default pages: Relay `http://127.0.0.1:9081`, Home `http://<home LAN IP>:9080`
+Default pages: Relay `http://127.0.0.1:9081`, Connector `http://<home LAN IP>:9080`
 (listening on 0.0.0.0). For the first login, read the bootstrap-token from the
 private directory in a local terminal; it expires after 15 minutes. Run
 `sudo openplayx-relay renew-bootstrap` to issue a new one. After setup, set an
 admin password of at least 16 characters.
 
-Open the Relay page locally or through an SSH port forward; the Home page is
+Open the Relay page locally or through an SSH port forward; the Connector page is
 opened directly by IP inside the home network by default. If you forward to a
 different local port, the browser's Host must be among the origins the
 management configuration allows; forwarding to the same port number is
@@ -185,14 +185,14 @@ ssh -L 9081:127.0.0.1:9081 user@relay.example.com
 
 ### Sharing public port 443 with the proxy (built-in SNI routing)
 
-The Relay can listen on public 443 itself and serve both the app/Home proxy
+The Relay can listen on public 443 itself and serve both the app/Connector proxy
 connections and the web admin page, without external programs such as HAProxy
 or Caddy. It reads only the SNI in the TLS ClientHello and decrypts nothing:
 
 - SNI equal to `singBox.inbound.tls.server_name` of the **currently applied
   revision**: the bytes are forwarded unchanged to sing-box on loopback
   (`singBox.inbound.listen:listen_port`), sing-box terminates TLS, and the
-  app/Home outbounds keep their address, port, UUID and certificate. If sing-box
+  app/Connector outbounds keep their address, port, UUID and certificate. If sing-box
   is not running, the connection is closed.
 - Any other TLS connection (for example a browser opening `https://<public IP>/`)
   is handed in-process to the HTTPS admin page, which sees the real client
@@ -218,7 +218,7 @@ Constraints (validated by the backend):
 - `frontend.listen` is the machine's actual public IP (not loopback; `0.0.0.0`
   would conflict with sing-box on loopback and is rejected). `frontend.port`
   must equal `singBox.inbound.listen_port`, because that is the `server_port`
-  of the Home and app outbounds.
+  of the Connector and app outbounds.
 - `singBox.inbound.listen` must be a loopback address; the admin page must use
   HTTPS with a managed certificate; an admin password must be set.
   `allowedHosts` must include the public IP or domain, the admin certificate's
@@ -233,7 +233,7 @@ Constraints (validated by the backend):
 with the applied revision, which briefly interrupts playback). After changing
 `singBox.inbound.tls.server_name`, routing follows the newly applied revision
 automatically. Once the public page, 401 for unauthenticated API calls, login
-and the Home tunnel are verified, remove the host firewall rule for `9081/tcp`
+and the Connector tunnel are verified, remove the host firewall rule for `9081/tcp`
 if it is no longer needed.
 
 Deployments that used HAProxy before (sing-box on `127.0.0.1:443`, admin page
@@ -241,11 +241,11 @@ on `127.0.0.2:443`) keep working. To switch to the built-in routing: save a
 revision with `frontend`, run `systemctl disable --now haproxy`, then restart
 `openplayx-relay` (the built-in entry needs the public 443 that HAProxy held).
 
-The Home allows direct LAN IP access by default, still requiring the admin
+The Connector allows direct LAN IP access by default, still requiring the admin
 password or the short-lived bootstrap credential, and accepts only requests
 from loopback or private home networks. Literal IPs that actually reach a local
 interface are allowed automatically; other host names must be listed in
-allowedHosts. Home write requests must have an Origin that exactly matches the
+allowedHosts. Connector write requests must have an Origin that exactly matches the
 current Host. Non-loopback Relay management still requires HTTPS and an admin
 password. After changing the management listener, the page only saves it;
 restart the service locally (`systemctl restart openplayx-relay`; components
@@ -262,7 +262,7 @@ as in effect.
    frontend's checks.
 3. Test the draft: generate the runtime configuration in memory, run the same
    built-in checks as `sing-box check` and `frps verify`/`frpc verify`, and load
-   the TLS assets; the Home also tests TCP reachability of the configured Relay.
+   the TLS assets; the Connector also tests TCP reachability of the configured Relay.
    This restarts no live components, writes no authoritative configuration and
    does not promise that media login or the tunnel already works.
 4. Save the JSON with expectedRevision; concurrent changes return 409. Secrets
@@ -270,7 +270,7 @@ as in effect.
    same directory, fsync and atomic replace. Saving is not applying.
 5. Apply the saved revision: validate first, then stop the old components
    in-process and start the new ones in the order sing-box → frps/frpc. The
-   Home starts frpc only after the SOCKS5 handshake is ready; frpc connects only
+   Connector starts frpc only after the SOCKS5 handshake is ready; frpc connects only
    through that SOCKS proxy and never falls back to a direct connection.
 6. On failure, the saved desired revision is kept, the page shows "saved but
    not in effect", and the previous runtime configuration from
@@ -333,12 +333,12 @@ The tests cover: secrets never appearing in normal JSON or APIs, revision
 conflicts, backup restore, protection of unknown/damaged files, hash-checked
 recovery, rejection of bad ports/paths/permissions, login/CSRF/cross-origin
 limits, rollback after a failed apply, pairing output, and a media link with
-real sing-box/frp running as both Relay and Home in one process
+real sing-box/frp running as both Relay and Connector in one process
 (`TestEndToEnd`, skipped with `go test -short`).
 
-An existing Home loopback configuration can be switched with
-`sudo ./openplayx-home install --enable-lan` (or, once installed,
-`sudo openplayx-home enable-lan` followed by a service restart), which saves a
-new revision explicitly. The option applies only to the Home; the Relay keeps
+An existing Connector loopback configuration can be switched with
+`sudo ./openplayx-connector install --enable-lan` (or, once installed,
+`sudo openplayx-connector enable-lan` followed by a service restart), which saves a
+new revision explicitly. The option applies only to the Connector; the Relay keeps
 its loopback default. The host firewall should allow TCP 9080 only from the
 home network; do not forward the port on the router.
