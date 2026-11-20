@@ -187,3 +187,7 @@ repository and the module versions locked in `src/go.sum`). Upstream sources:
 [sing-box v1.12.12](https://github.com/SagerNet/sing-box/tree/v1.12.12),
 [frp v0.65.0](https://github.com/fatedier/frp/tree/v0.65.0). Configuration
 fields follow these pinned versions.
+
+## Centrally managed nodes
+
+The separate `managed --config <private-file>` mode consumes the central Relay profile, isolates Connector frps instances on loopback, applies per-identity port grants, acknowledges applied revisions, and stops forwarding when its lease expires. Legacy `serve`/`pair` mode is unchanged. See [managed mode](docs/managed.zh-CN.md) for deployment and current limits.

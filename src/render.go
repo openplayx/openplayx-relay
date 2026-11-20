@@ -27,13 +27,14 @@ import (
 // Plan holds derived sing-box and frp configuration that passed the same
 // checks as `sing-box check` and `frps/frpc verify`.
 type Plan struct {
-	Role      string
-	Revision  any
-	SingBox   []byte
-	FRP       []byte
-	SocksPort int
-	Retry     time.Duration
-	LogLevel  string
+	Role       string
+	Revision   any
+	SingBox    []byte
+	FRP        []byte
+	FRPServers [][]byte // managed Relay: one isolated frps per Connector
+	SocksPort  int
+	Retry      time.Duration
+	LogLevel   string
 	// Relay only: where the shared public TLS entry forwards proxy traffic.
 	ProxyAddress string
 	ServerName   string

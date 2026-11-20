@@ -41,6 +41,7 @@ func usage() {
 Usage: %[1]s <command> [flags]
 
 Commands:
+  managed          run a centrally managed Relay node
   serve            run the Web manager and the embedded sing-box/%[5]s (default)
   apply            apply the saved revision to the installed systemd service
   status           print saved/applied revision and component state
@@ -73,6 +74,12 @@ func main() {
 	}
 	var err error
 	switch command {
+	case "managed":
+		if role != roleRelay {
+			err = errors.New("managed mode is available on Relay only")
+		} else {
+			err = cmdManaged(args)
+		}
 	case "serve":
 		err = cmdServe(args)
 	case "apply":

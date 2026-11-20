@@ -19,18 +19,20 @@ import (
 // this process. Home starts frpc only after its loopback SOCKS5 entry answers
 // a handshake, and frpc always dials through it: there is no direct mode.
 type Runtime struct {
-	mu         sync.Mutex
-	role       string
-	box        *box.Box
-	boxCancel  context.CancelFunc
-	frps       *frpserver.Service
-	frpsCancel context.CancelFunc
-	frpc       *frpclient.Service
-	frpcCancel context.CancelFunc
-	frpcDone   chan struct{}
-	state      map[string]string
-	revision   any
-	onChange   func(revision any, components map[string]string)
+	mu              sync.Mutex
+	role            string
+	box             *box.Box
+	boxCancel       context.CancelFunc
+	frps            *frpserver.Service
+	frpsCancel      context.CancelFunc
+	extraFRPS       []*frpserver.Service
+	extraFRPSCancel []context.CancelFunc
+	frpc            *frpclient.Service
+	frpcCancel      context.CancelFunc
+	frpcDone        chan struct{}
+	state           map[string]string
+	revision        any
+	onChange        func(revision any, components map[string]string)
 	// proxyAddress/serverName describe the running sing-box inbound (Relay)
 	// for the shared public TLS entry.
 	proxyAddress string
@@ -127,17 +129,28 @@ func (r *Runtime) startLocked(plan *Plan) error {
 	}
 	r.state["sing-box"] = "active"
 	if r.role == roleRelay {
-		cfg, err := frpServerConfig(plan.FRP)
-		if err != nil {
-			return fmt.Errorf("frps config: %w", err)
+		configs := [][]byte{plan.FRP}
+		if plan.FRPServers != nil {
+			configs = plan.FRPServers
 		}
-		service, err := frpserver.NewService(cfg)
-		if err != nil {
-			return fmt.Errorf("frps: %w", err)
+		for index, raw := range configs {
+			cfg, err := frpServerConfig(raw)
+			if err != nil {
+				return fmt.Errorf("frps config: %w", err)
+			}
+			service, err := frpserver.NewService(cfg)
+			if err != nil {
+				return fmt.Errorf("frps: %w", err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			if index == 0 {
+				r.frps, r.frpsCancel = service, cancel
+			} else {
+				r.extraFRPS = append(r.extraFRPS, service)
+				r.extraFRPSCancel = append(r.extraFRPSCancel, cancel)
+			}
+			go service.Run(ctx)
 		}
-		ctx, cancel := context.WithCancel(context.Background())
-		r.frps, r.frpsCancel = service, cancel
-		go service.Run(ctx)
 		r.state["frps"] = "active"
 		return nil
 	}
@@ -197,6 +210,12 @@ func (r *Runtime) stopLocked() {
 		}
 		r.frpc, r.frpcCancel, r.frpcDone = nil, nil, nil
 	}
+	for index, service := range r.extraFRPS {
+		service.Close()
+		r.extraFRPSCancel[index]()
+	}
+	r.extraFRPS = nil
+	r.extraFRPSCancel = nil
 	if r.frps != nil {
 		r.frps.Close()
 		r.frpsCancel()

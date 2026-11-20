@@ -110,3 +110,7 @@ sudo openplayx-relay uninstall       # 删除 systemd 服务，保留配置与 r
 ## 上游与许可证
 
 sing-box 以 GPL-3.0-or-later 授权（另有命名限制），本程序静态链接 sing-box，因此本仓库源码及分发的二进制整体按 **GPL-3.0-or-later** 提供，许可证全文见 [COPYING](COPYING)。frp 为 Apache-2.0。分发二进制时须同时提供对应源码（本仓库及 `src/go.sum` 锁定的模块版本）。上游源码：[sing-box v1.12.12](https://github.com/SagerNet/sing-box/tree/v1.12.12)、[frp v0.65.0](https://github.com/fatedier/frp/tree/v0.65.0)。配置字段以这些固定版本为准。
+
+## 中心托管模式
+
+新增独立 `managed` 子命令，供 API 管理后台自动部署的节点使用。支持配置订阅、按身份/端口授权、每个 Connector 独立回环 frps、更新关闭旧连接、ACK 和租约失效关闭；不读取旧配对配置。详见 [中心托管说明](docs/managed.zh-CN.md)。
