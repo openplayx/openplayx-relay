@@ -1,5 +1,7 @@
 # OpenPlayX Relay
 
+Release tags use `vMAJOR.MINOR.PATCH` (for example `v0.1.1`); the binary version is recorded separately in the managed release descriptor.
+
 English | [简体中文](README.zh-CN.md)
 
 [![License: GPL v3+](https://img.shields.io/badge/license-GPLv3%2B-blue.svg)](COPYING)

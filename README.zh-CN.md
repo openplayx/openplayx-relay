@@ -1,5 +1,7 @@
 # OpenPlayX Relay
 
+发布 tag 统一为 `v主版本.次版本.补丁版本`（例如 `v0.1.1`）；安装包内程序版本由托管发布描述中的 binaryVersion 单独记录。
+
 [English](README.md) | 简体中文
 
 [![License: GPL v3+](https://img.shields.io/badge/license-GPLv3%2B-blue.svg)](COPYING)
