@@ -82,6 +82,9 @@ type managedIdentity struct {
 	token string
 	ports map[int]bool
 }
+
+var managedProcessStartedAt = time.Now().UTC().Format(time.RFC3339Nano)
+
 type managedAgent struct {
 	syncMu          sync.Mutex
 	mu              sync.RWMutex
@@ -263,7 +266,7 @@ func (m *managedAgent) health(w http.ResponseWriter, r *http.Request) {
 	} else {
 		w.WriteHeader(503)
 	}
-	_ = json.NewEncoder(w).Encode(obj{"nodeId": m.config.NodeID, "protocol": "managed-v1", "nodeState": nodeState, "releaseTag": m.config.ReleaseTag, "releaseCommit": m.config.ReleaseCommit, "binaryVersion": version, "revision": revision, "baseRevision": baseRevision, "policyRevision": policyRevision, "runtime": status})
+	_ = json.NewEncoder(w).Encode(obj{"nodeId": m.config.NodeID, "protocol": "managed-v1", "nodeState": nodeState, "releaseTag": m.config.ReleaseTag, "releaseCommit": m.config.ReleaseCommit, "binaryVersion": version, "processStartedAt": managedProcessStartedAt, "revision": revision, "baseRevision": baseRevision, "policyRevision": policyRevision, "runtime": status})
 }
 func (m *managedAgent) request(ctx context.Context, path string, body any) (*http.Response, error) {
 	var reader io.Reader

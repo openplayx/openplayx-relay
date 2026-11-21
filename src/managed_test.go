@@ -243,6 +243,10 @@ func TestManagedSyncRetainsLastGoodPolicyAndSkipsUnchangedRestarts(t *testing.T)
 	if w.Code != 200 {
 		t.Fatal("ready health rejected", w.Body.String())
 	}
+	var health obj
+	if err := json.Unmarshal(w.Body.Bytes(), &health); err != nil || health["processStartedAt"] != managedProcessStartedAt {
+		t.Fatal("health must identify the current Relay process start", w.Body.String())
+	}
 	boxBefore := a.runtime.listener
 	p.Revision = "2"
 	p.ValidUntil = time.Now().Add(-time.Hour)
