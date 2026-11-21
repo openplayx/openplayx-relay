@@ -1,20 +1,26 @@
 'use strict';
+// Strings live in i18n/<locale>/ui.json (served as /i18n.js for ui/opx-i18n.js).
+const t = (key, vars) => opxI18n.t(key, vars);
 const $ = id => document.getElementById(id);
 let csrf = '', role = '', config = null, tlsFiles = [], busy = false;
 const controls = new Map(), secretControls = new Map();
 
-function message(text, error = false) { $('notice').textContent = text; $('notice').dataset.error = String(error); }
+function message(text, error = false) { opxI18n.mark($('notice'), null); $('notice').textContent = text; $('notice').dataset.error = String(error); }
+// note shows a localized notice that follows language switches.
+function note(key, vars, error = false) { message('', error); opxI18n.mark($('notice'), key, vars); }
 
 async function api(path, body) {
   const response = await fetch('/api/' + path, {
     method: body === undefined ? 'GET' : 'POST', credentials: 'same-origin',
-    headers: body === undefined ? {} : {'Content-Type': 'application/json', 'X-CSRF-Token': csrf},
+    headers: body === undefined ? {'Accept-Language': opxI18n.locale()} : {'Accept-Language': opxI18n.locale(), 'Content-Type': 'application/json', 'X-CSRF-Token': csrf},
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = await response.json();
   if (!response.ok) {
     if (response.status === 401) { $('workspace').hidden = true; $('login').hidden = false; }
-    throw new Error(data.message || '操作失败');
+    const failure = new Error(data.message || t('error.generic'));
+    failure.status = response.status;
+    throw failure;
   }
   return data;
 }
@@ -61,8 +67,8 @@ function readControl(element, type) {
 }
 
 function tlsOptions(value) {
-  const options = [['', '选择已导入 TLS 文件'], ...tlsFiles.map(n => [n, n])];
-  if (value && !tlsFiles.includes(value)) options.push([value, value + '（不可用）']);
+  const options = [['', t('tls.choose')], ...tlsFiles.map(n => [n, n])];
+  if (value && !tlsFiles.includes(value)) options.push([value, t('tls.unavailable', {file: value})]);
   return options;
 }
 function tlsField(parent, key, label, value = get(config, key)) {
@@ -87,7 +93,7 @@ function secretInput(placeholder, generate) {
   if (generate) {
     const button = document.createElement('button');
     button.type = 'button';
-    button.textContent = '生成 UUID';
+    button.textContent = t('secret.generateUUID');
     button.addEventListener('click', () => { element.type = 'text'; element.value = randomUUID(); });
     wrap.append(button);
   }
@@ -99,12 +105,12 @@ function secretField(parent, key, label, generate = false) {
   const wrap = document.createElement('div');
   const title = document.createElement('label');
   title.textContent = label;
-  const {wrap: inner, element} = secretInput('留空保留已有凭据', generate);
+  const {wrap: inner, element} = secretInput(t('secret.keep'), generate);
   title.append(inner);
   const clearLabel = document.createElement('label');
   const clear = document.createElement('input');
   clear.type = 'checkbox';
-  clearLabel.append(clear, document.createTextNode('明确清除此凭据'));
+  clearLabel.append(clear, document.createTextNode(t('secret.clear')));
   wrap.append(title, clearLabel);
   $(parent).append(wrap);
   secretControls.set(key, {input: element, clear});
@@ -125,7 +131,7 @@ function row(parent, definitions, item, extra) {
   if (extra) extra(container, fields);
   const remove = document.createElement('button');
   remove.type = 'button';
-  remove.textContent = '移除';
+  remove.textContent = t('common.remove');
   remove.addEventListener('click', () => container.remove());
   container.append(remove);
   $(parent).append(container);
@@ -142,10 +148,10 @@ const csv = value => (value ?? []).join(', ');
 const parseCSV = text => text.split(',').map(s => s.trim()).filter(Boolean);
 
 function userRow(user = {name: '', uuid: ''}) {
-  const element = row('users', [['name', '身份名称', 'text']], user, (container, fields) => {
+  const element = row('users', [['name', t('field.identityName'), 'text']], user, (container, fields) => {
     const label = document.createElement('label');
-    label.textContent = '认证 UUID';
-    const {wrap, element: secret} = secretInput(user.uuid ? '留空保留已有 UUID' : '新 user 必须设置 UUID', true);
+    label.textContent = t('field.authUUID');
+    const {wrap, element: secret} = secretInput(user.uuid ? t('secret.keepUUID') : t('secret.newUUID'), true);
     secret.dataset.secret = 'uuid';
     label.append(wrap);
     fields.append(label);
@@ -154,17 +160,17 @@ function userRow(user = {name: '', uuid: ''}) {
 }
 
 function ruleRow(rule = {auth_user: [], port: [18096]}) {
-  row('rules', [['auth_user', '身份名称', 'text'], ['port', '端口', 'text'], ['port_range', '端口范围', 'text']],
+  row('rules', [['auth_user', t('field.identityName'), 'text'], ['port', t('field.port'), 'text'], ['port_range', t('field.portRange'), 'text']],
     {auth_user: csv(rule.auth_user), port: csv(rule.port), port_range: csv(rule.port_range)});
 }
 
 function allowRow(entry = {single: 18096}) {
-  row('frp-list', [['start', '起始端口', 'number'], ['end', '结束端口（单个端口留空）', 'text']],
+  row('frp-list', [['start', t('field.startPort'), 'number'], ['end', t('field.endPort'), 'text']],
     {start: entry.single ?? entry.start, end: entry.single === undefined ? entry.end : ''});
 }
 
 function proxyRow(proxy = {name: '', type: 'tcp', localIP: '192.168.1.10', localPort: 8096, remotePort: 18096}) {
-  row('frp-list', [['name', '服务名称', 'text'], ['localIP', '家庭设备 IP', 'text'], ['localPort', '家庭服务端口', 'number'], ['remotePort', '中继映射端口', 'number']], proxy);
+  row('frp-list', [['name', t('field.serviceName'), 'text'], ['localIP', t('field.homeIP'), 'text'], ['localPort', t('field.homePort'), 'number'], ['remotePort', t('field.relayPort'), 'number']], proxy);
 }
 
 function summaryItem(parent, title, value) {
@@ -179,41 +185,41 @@ function renderOverview() {
   const transport = $('transport-summary'), services = $('services-summary');
   transport.replaceChildren(); services.replaceChildren();
   $('transport-note').textContent = relay
-    ? 'Connector 与 App → Relay 加密入口 → 服务注册与转发'
-    : '家庭服务 → Connector → 加密连接 → Relay';
+    ? t('overview.relayFlow')
+    : t('overview.homeFlow');
   $('services-note').textContent = relay
-    ? '此端管理服务端口范围与访问权限。实际家庭服务列表在 Connector 配置。'
-    : 'App 通过 Relay 的映射端口访问这些家庭服务。';
+    ? t('overview.relayServices')
+    : t('overview.homeServices');
   $('management-note').textContent = relay
-    ? '公网访问须使用 HTTPS 和管理员认证。管理页可与加密连接共用 443 端口。修改管理入口后需要在机器上重启管理服务。'
-    : '家庭局域网通过本机 IP 访问，仍需管理员登录。修改管理入口后需要在机器上重启管理服务。';
+    ? t('overview.relayManagement')
+    : t('overview.homeManagement');
   if (relay) {
     const inbound = config.singBox.inbound;
     const frontend = config.management.frontend;
-    summaryItem(transport, '加密入口', `${frontend?.listen || inbound.listen}:${frontend?.port || inbound.listen_port}`);
-    summaryItem(transport, 'TLS 服务器名称', inbound.tls.server_name);
-    summaryItem(transport, '接入身份', inbound.users.map(u => u.name).join('、') || '尚未配置');
-    summaryItem(transport, '服务注册入口', `127.0.0.1:${config.frps.bindPort}`);
+    summaryItem(transport, t('overview.entry'), `${frontend?.listen || inbound.listen}:${frontend?.port || inbound.listen_port}`);
+    summaryItem(transport, t('field.tlsServerName'), inbound.tls.server_name);
+    summaryItem(transport, t('overview.identities'), inbound.users.map(u => u.name).join(t('list.sep')) || t('common.notConfigured'));
+    summaryItem(transport, t('overview.registration'), `127.0.0.1:${config.frps.bindPort}`);
     const summary = document.createElement('dl'); summary.className = 'summary-grid';
-    summaryItem(summary, '允许的映射端口', config.frps.allowPorts.map(p => p.single ?? `${p.start}–${p.end}`).join('、') || '无');
+    summaryItem(summary, t('overview.allowedPorts'), config.frps.allowPorts.map(p => p.single ?? `${p.start}–${p.end}`).join(t('list.sep')) || t('common.none'));
     for (const rule of config.singBox.route.rules) {
-      summaryItem(summary, rule.auth_user.join('、'), [...(rule.port || []), ...(rule.port_range || [])].join('、') || '无允许端口');
+      summaryItem(summary, rule.auth_user.join(t('list.sep')), [...(rule.port || []), ...(rule.port_range || [])].join(t('list.sep')) || t('overview.noPorts'));
     }
     services.append(summary);
   } else {
     const out = config.singBox.outbound;
     summaryItem(transport, 'Relay', `${out.server}:${out.server_port}`);
-    summaryItem(transport, 'TLS 服务器名称', out.tls.server_name);
-    summaryItem(transport, '家庭标识', config.frpc.user || '未设置');
-    summaryItem(transport, '认证凭据', '已配置，修改时留空保留');
+    summaryItem(transport, t('field.tlsServerName'), out.tls.server_name);
+    summaryItem(transport, t('field.homeId'), config.frpc.user || t('common.notSet'));
+    summaryItem(transport, t('overview.credential'), t('overview.credentialSet'));
     if (!config.frpc.proxies.length) {
-      const empty = document.createElement('p'); empty.textContent = '尚未添加服务'; services.append(empty);
+      const empty = document.createElement('p'); empty.textContent = t('overview.noServices'); services.append(empty);
     }
     for (const proxy of config.frpc.proxies) {
       const summary = document.createElement('dl'); summary.className = 'summary-grid service-summary';
-      summaryItem(summary, '服务名称', proxy.name);
-      summaryItem(summary, '家庭地址', `${proxy.localIP}:${proxy.localPort}`);
-      summaryItem(summary, '中继映射端口', proxy.remotePort);
+      summaryItem(summary, t('field.serviceName'), proxy.name);
+      summaryItem(summary, t('overview.homeAddress'), `${proxy.localIP}:${proxy.localPort}`);
+      summaryItem(summary, t('field.relayPort'), proxy.remotePort);
       services.append(summary);
     }
   }
@@ -225,64 +231,64 @@ function render(data) {
   for (const id of ['singbox-fields', 'singbox-secrets', 'users', 'rules', 'frp-fields', 'frp-secrets', 'frp-list', 'log-fields', 'management-fields']) $(id).replaceChildren();
   const relay = role === 'relay';
   renderOverview();
-  $('title').textContent = relay ? 'Relay 配置' : '家庭端配置';
+  $('title').textContent = relay ? t('title.relay') : t('title.home');
   document.title = 'OpenPlayX · ' + $('title').textContent;
   $('users-block').hidden = $('rules-block').hidden = !relay;
 
   if (relay) {
-    $('singbox-note').textContent = 'Connector 和 App 通过此加密入口连接 Relay。';
-    field('singbox-fields', 'singBox.inbound.listen', '监听地址');
-    field('singbox-fields', 'singBox.inbound.listen_port', '加密连接端口', 'number');
-    field('singbox-fields', 'singBox.inbound.tls.server_name', 'TLS 服务器名称');
-    tlsField('singbox-fields', 'singBox.inbound.tls.certificate_path', '服务器证书');
-    tlsField('singbox-fields', 'singBox.inbound.tls.key_path', '服务器私钥');
+    $('singbox-note').textContent = t('relay.singboxNote');
+    field('singbox-fields', 'singBox.inbound.listen', t('field.listen'));
+    field('singbox-fields', 'singBox.inbound.listen_port', t('field.encryptedPort'), 'number');
+    field('singbox-fields', 'singBox.inbound.tls.server_name', t('field.tlsServerName'));
+    tlsField('singbox-fields', 'singBox.inbound.tls.certificate_path', t('field.serverCert'));
+    tlsField('singbox-fields', 'singBox.inbound.tls.key_path', t('field.serverKey'));
     for (const user of config.singBox.inbound.users) userRow(user);
     for (const rule of config.singBox.route.rules) ruleRow(rule);
 
-    $('frp-title').textContent = '服务注册入口';
-    $('frp-note').textContent = '接收 Connector 的服务注册，仅监听本机回环，并验证加密连接。';
-    field('frp-fields', 'frps.bindPort', '服务注册控制端口', 'number');
-    tlsField('frp-fields', 'frps.transport.tls.certFile', '注册连接证书');
-    tlsField('frp-fields', 'frps.transport.tls.keyFile', '注册连接私钥');
-    secretField('frp-secrets', 'token', '服务注册凭据（至少 32 字符）');
-    $('frp-list-title').textContent = '允许注册的映射端口';
-    $('frp-list-note').textContent = '允许 Connector 注册的端口范围；单个端口不填结束端口。';
-    $('add-frp-item').textContent = '添加端口范围';
+    $('frp-title').textContent = t('overview.registration');
+    $('frp-note').textContent = t('relay.frpNote');
+    field('frp-fields', 'frps.bindPort', t('field.registrationPort'), 'number');
+    tlsField('frp-fields', 'frps.transport.tls.certFile', t('field.registrationCert'));
+    tlsField('frp-fields', 'frps.transport.tls.keyFile', t('field.registrationKey'));
+    secretField('frp-secrets', 'token', t('field.tokenRelay'));
+    $('frp-list-title').textContent = t('relay.allowTitle');
+    $('frp-list-note').textContent = t('relay.allowNote');
+    $('add-frp-item').textContent = t('relay.addRange');
     for (const entry of config.frps.allowPorts) allowRow(entry);
   } else {
-    $('singbox-note').textContent = '家庭端通过加密连接访问 Relay，本机转发入口仅供服务注册使用。';
-    field('singbox-fields', 'singBox.outbound.server', 'Relay 地址');
-    field('singbox-fields', 'singBox.outbound.server_port', 'Relay 端口', 'number');
-    field('singbox-fields', 'singBox.outbound.tls.server_name', 'TLS 服务器名称');
-    field('singbox-fields', 'singBox.inbound.listen_port', '本机转发端口（仅回环）', 'number');
-    const ca = field('singbox-fields', 'singBox.outbound.tls.certificate', '受信任 CA（可选，公开内容）', 'textarea');
+    $('singbox-note').textContent = t('home.singboxNote');
+    field('singbox-fields', 'singBox.outbound.server', t('field.relayAddress'));
+    field('singbox-fields', 'singBox.outbound.server_port', t('field.relayServerPort'), 'number');
+    field('singbox-fields', 'singBox.outbound.tls.server_name', t('field.tlsServerName'));
+    field('singbox-fields', 'singBox.inbound.listen_port', t('field.localForward'), 'number');
+    const ca = field('singbox-fields', 'singBox.outbound.tls.certificate', t('field.trustedCA'), 'textarea');
     ca.parentElement.classList.add('wide');
-    secretField('singbox-secrets', 'uuid', 'Connector 认证 UUID');
+    secretField('singbox-secrets', 'uuid', t('field.connectorUUID'));
 
-    $('frp-title').textContent = '服务注册连接';
-    $('frp-note').textContent = '通过上面的加密链路注册家庭服务，家庭标识用于区分服务名称。';
-    field('frp-fields', 'frpc.user', '家庭标识');
-    field('frp-fields', 'frpc.serverPort', 'Relay 控制端口', 'number');
-    field('frp-fields', 'frpc.transport.tls.serverName', '注册连接 TLS 名称');
-    tlsField('frp-fields', 'frpc.transport.tls.trustedCaFile', '注册连接 CA 文件');
-    secretField('frp-secrets', 'token', '服务注册凭据（与 Relay 一致）');
-    $('frp-list-title').textContent = '家庭服务映射';
-    $('frp-list-note').textContent = '填写家庭服务的实际地址和端口。中继映射端口须在 Relay 允许的范围内，App 使用服务名称和映射端口连接。';
-    $('add-frp-item').textContent = '添加服务';
+    $('frp-title').textContent = t('home.frpTitle');
+    $('frp-note').textContent = t('home.frpNote');
+    field('frp-fields', 'frpc.user', t('field.homeId'));
+    field('frp-fields', 'frpc.serverPort', t('field.relayControlPort'), 'number');
+    field('frp-fields', 'frpc.transport.tls.serverName', t('field.registrationTLSName'));
+    tlsField('frp-fields', 'frpc.transport.tls.trustedCaFile', t('field.registrationCA'));
+    secretField('frp-secrets', 'token', t('field.tokenHome'));
+    $('frp-list-title').textContent = t('home.listTitle');
+    $('frp-list-note').textContent = t('home.listNote');
+    $('add-frp-item').textContent = t('home.addService');
     for (const proxy of config.frpc.proxies) proxyRow(proxy);
   }
-  field('log-fields', 'log.level', '组件日志', 'text', [['error', '错误'], ['warn', '警告'], ['info', '信息']]);
+  field('log-fields', 'log.level', t('field.logLevel'), 'text', [['error', t('log.error')], ['warn', t('log.warn')], ['info', t('log.info')]]);
 
   const m = config.management;
-  field('management-fields', 'management.listen', '管理监听 IP');
-  field('management-fields', 'management.port', '管理端口', 'number');
-  field('management-fields', 'management.https', '启用管理 HTTPS', 'checkbox');
-  field('management-fields', 'management.allowedHosts', '允许的访问主机名（逗号分隔，不含端口）', 'text', undefined, m.allowedHosts.join(', '));
-  tlsField('management-fields', 'management.certificateFile', '管理 HTTPS 证书', m.certificateFile || '');
-  tlsField('management-fields', 'management.keyFile', '管理 HTTPS 私钥', m.keyFile || '');
+  field('management-fields', 'management.listen', t('field.managementListen'));
+  field('management-fields', 'management.port', t('field.managementPort'), 'number');
+  field('management-fields', 'management.https', t('field.managementHTTPS'), 'checkbox');
+  field('management-fields', 'management.allowedHosts', t('field.allowedHosts'), 'text', undefined, m.allowedHosts.join(', '));
+  tlsField('management-fields', 'management.certificateFile', t('field.managementCert'), m.certificateFile || '');
+  tlsField('management-fields', 'management.keyFile', t('field.managementKey'), m.keyFile || '');
   if (relay) {
-    field('management-fields', 'frontend.listen', '公网 TLS 入口 IP（留空关闭；与 inbound 共用端口，按 SNI 分流）', 'text', undefined, m.frontend?.listen ?? '');
-    field('management-fields', 'frontend.port', '公网 TLS 入口端口（须等于 inbound.listen_port）', 'number', undefined, m.frontend?.port ?? config.singBox.inbound.listen_port);
+    field('management-fields', 'frontend.listen', t('field.frontendListen'), 'text', undefined, m.frontend?.listen ?? '');
+    field('management-fields', 'frontend.port', t('field.frontendPort'), 'number', undefined, m.frontend?.port ?? config.singBox.inbound.listen_port);
   }
 }
 
@@ -337,9 +343,13 @@ function collectSecrets() {
   return values;
 }
 
+let lastStatus = null;
 async function status() {
-  const s = await api('status');
-  $('status').textContent = `期望修订 ${s.desiredRevision} · 实际生效修订 ${s.appliedRevision ?? '无'} · ${s.savedIsApplied ? '已应用' : '已保存但未生效'}${s.error ? ' · ' + s.error : ''}${s.managementRestartRequired ? ' · 管理入口待本机重启' : ''}`;
+  showStatus(await api('status'));
+}
+function showStatus(s) {
+  lastStatus = s;
+  $('status').textContent = t('status.line', {desired: s.desiredRevision, applied: s.appliedRevision ?? t('common.none'), state: s.savedIsApplied ? t('status.applied') : t('status.savedNotApplied')}) + (s.error ? ' · ' + s.error : '') + (s.managementRestartRequired ? ' · ' + t('status.restartManager') : '');
   $('components').replaceChildren();
   for (const [name, state] of Object.entries(s.components)) {
     const badge = document.createElement('span');
@@ -375,7 +385,7 @@ function signedOut() {
 $('login-button').addEventListener('click', () => perform(async () => {
   await signedIn(await api('login', {password: $('password').value}));
   $('password').value = '';
-  message('已登录。保存只更新本端 JSON，应用才切换运行配置。');
+  note('notice.signedIn');
 }));
 $('password').addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); $('login-button').click(); } });
 
@@ -390,11 +400,11 @@ $('logout').addEventListener('click', () => perform(async () => {
   await api('logout', {});
   signedOut();
   $('logout').hidden = true;
-  message('已退出。');
+  note('notice.signedOut');
 }));
 
 $('refresh').addEventListener('click', () => perform(async () => {
-  if (confirm('丢弃未保存草稿并重新加载？')) { await load(); message('已重新加载。'); }
+  if (confirm(t('confirm.reload'))) { await load(); note('notice.reloaded'); }
 }));
 
 $('add-user').addEventListener('click', () => userRow());
@@ -403,7 +413,7 @@ $('add-frp-item').addEventListener('click', () => role === 'relay' ? allowRow() 
 
 for (const action of ['validate', 'test']) $(action).addEventListener('click', () => perform(async () => {
   const result = await api(action, {config: draft(), secrets: collectSecrets()});
-  message(result.message || `草稿修订 ${result.draftRevision} 字段校验通过；尚未保存或应用，组件检查请使用测试草稿。`);
+  if (result.message) message(result.message); else note('notice.validated', {revision: result.draftRevision});
 }));
 
 $('configuration').addEventListener('submit', event => {
@@ -416,15 +426,15 @@ $('configuration').addEventListener('submit', event => {
 });
 
 $('apply').addEventListener('click', () => perform(async () => {
-  if (!confirm('应用已保存配置将重启本端组件，可能中断活动播放。确认继续？')) return;
+  if (!confirm(t('confirm.apply'))) return;
   try {
     await api('apply', {expectedRevision: config.revision});
-    message('本端组件已应用此修订；仍需实际验证其他端和媒体服务。');
+    note('notice.applied');
   } finally { await status(); }
 }));
 
 $('restore').addEventListener('click', () => perform(async () => {
-  if (!confirm('将上一份配置恢复为新修订？恢复后还需要应用。')) return;
+  if (!confirm(t('confirm.restore'))) return;
   const result = await api('restore', {expectedRevision: config.revision});
   await load();
   message(result.message);
@@ -436,28 +446,43 @@ $('export').addEventListener('click', () => perform(async () => {
   const anchor = document.createElement('a');
   anchor.href = url; anchor.download = role + '.redacted.json'; anchor.click();
   URL.revokeObjectURL(url);
-  message('已导出普通配置和机密引用，不含实际 UUID、token 或私钥。');
+  note('notice.exported');
 }));
 
 $('tls-upload-button').addEventListener('click', () => perform(async () => {
   const file = $('tls-upload').files[0];
-  if (!file || file.size > 131072) throw new Error('请选择最多 128 KiB 的 PEM 文件。');
+  if (!file || file.size > 131072) throw new Error(t('error.pemSize'));
   const draftConfig = draft();
   const result = await api('tls', {kind: $('tls-kind').value, content: await file.text()});
   const metadata = await api('config');
   metadata.config = draftConfig;
   render(metadata);
-  message('TLS 文件已导入：' + result.file + '。请选择对应字段，再保存和应用。未保存的机密输入需要重新填写。');
+  note('notice.tlsImported', {file: result.file});
 }));
 
 $('recover-button').addEventListener('click', () => perform(async () => {
   const info = await api('recovery');
-  if (!confirm('保留无法识别的原文件，并把备份修订 ' + info.backupRevision + ' 保存为新修订？恢复后仍需应用。')) return;
+  if (!confirm(t('confirm.recover', {revision: info.backupRevision}))) return;
   const result = await api('recover', {fileHash: info.fileHash});
   await load();
   message(result.message);
 }));
 
 perform(async () => {
-  try { await signedIn(await api('session')); } catch (e) { if (!e.message.includes('登录')) message(e.message, true); }
+  try { await signedIn(await api('session')); } catch (e) { if (e.status !== 401) message(e.message, true); }
+});
+
+// Language switch: rebuild the localized form from the current (unsaved) draft, keep typed secrets.
+document.addEventListener('opx:langchange', () => {
+  document.title = 'OpenPlayX · ' + t(config ? (role === 'relay' ? 'title.relay' : 'title.home') : 'title.default');
+  if (!config || $('workspace').hidden) return;
+  const secrets = [...secretControls].map(([key, {input: element, clear}]) => [key, element.value, clear.checked]);
+  const userSecrets = [...$('users').children].map(r => r.querySelector('[data-secret]')?.value || '');
+  const saved = config;
+  render({config: draft(), role, tlsFiles});
+  config = saved;
+  renderOverview();
+  for (const [key, value, cleared] of secrets) { const c = secretControls.get(key); if (c) { c.input.value = value; c.clear.checked = cleared; } }
+  [...$('users').children].forEach((r, i) => { const secret = r.querySelector('[data-secret]'); if (secret && userSecrets[i]) secret.value = userSecrets[i]; });
+  if (lastStatus) showStatus(lastStatus);
 });

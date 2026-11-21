@@ -1,7 +1,8 @@
 /* OpenPlayX UI kit — theme + small behaviours for Basecoat pages.
    Load synchronously in <head> (after the CSS) so the theme applies before first paint.
    Theme preference: toggle choice → ?theme=light|dark → localStorage "opx-theme" → OS setting (default).
-   Put <button data-theme-toggle> anywhere to get a system/light/dark switch. */
+   Put <button data-theme-toggle> anywhere to get a system/light/dark switch.
+   Toggle labels follow <html lang> and refresh on opx-i18n's 'opx:langchange' event. */
 (function(){
   'use strict';
   var root=document.documentElement,mq=window.matchMedia('(prefers-color-scheme: dark)'),chosen=null;
@@ -15,11 +16,11 @@
   var ICONS={system:'<rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8M12 17v4"/>',light:'<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>',dark:'<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>'};
   var NEXT={system:'light',light:'dark',dark:'system'};
   function labels(){return /^zh/i.test(root.lang||'')?{system:'跟随系统',light:'浅色',dark:'深色',prefix:'主题：'}:{system:'System',light:'Light',dark:'Dark',prefix:'Theme: '};}
-  function renderToggles(){
-    var p=pref(),l=labels();
+  function renderToggles(force){
+    var p=pref(),l=labels(),state=p+'|'+(root.lang||'');
     document.querySelectorAll('[data-theme-toggle]').forEach(function(button){
-      if(button.getAttribute('data-theme-state')===p)return;
-      button.setAttribute('data-theme-state',p);
+      if(force!==true&&button.getAttribute('data-theme-state')===state)return;
+      button.setAttribute('data-theme-state',state);
       button.innerHTML='<svg class="opx-icon" viewBox="0 0 24 24" aria-hidden="true">'+ICONS[p]+'</svg>'+(button.hasAttribute('data-theme-toggle-text')?'<span>'+l[p]+'</span>':'');
       button.setAttribute('aria-label',l.prefix+l[p]);
       button.title=l.prefix+l[p];
@@ -33,6 +34,7 @@
   document.addEventListener('click',function(event){var t=event.target.closest&&event.target.closest('[data-theme-toggle]');if(t){event.preventDefault();window.opxTheme.cycle();}});
   window.addEventListener('storage',function(event){if(event.key==='opx-theme'){chosen=null;apply();}});
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',renderToggles);
+  document.addEventListener('opx:langchange',function(){renderToggles(true);});
 
   /* Basecoat .sidebar: open on desktop, off-canvas below 768px.
      Any [data-sidebar-toggle] button toggles it; links/buttons inside close it on mobile. */

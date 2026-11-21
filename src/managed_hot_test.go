@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -123,6 +124,39 @@ func TestManagedHotUpdatesPreserveLiveStreamsAndRevokeOnlyAffectedRoutes(t *test
 	portA := p.Policies[0].Services[0].RemotePort
 	connA := connect(app, portA)
 	defer connA.Close()
+	// Live statistics report the device and Connector streams with traffic.
+	liveRequest := httptest.NewRequest("GET", "https://status.localhost/live", nil)
+	liveRequest.Header.Set("Authorization", "Bearer "+a.config.MachineToken)
+	liveRecorder := httptest.NewRecorder()
+	a.health(liveRecorder, liveRequest)
+	var live struct {
+		Totals     struct{ RxBytes, TxBytes uint64 }
+		Principals []struct {
+			ID, Kind, UserID string
+			Streams          int
+			RxBytes, TxBytes uint64
+		}
+		Streams []struct{ Principal, Kind, ServiceID string }
+	}
+	if err := json.Unmarshal(liveRecorder.Body.Bytes(), &live); err != nil || liveRecorder.Code != 200 {
+		t.Fatal("live statistics unavailable", liveRecorder.Body.String())
+	}
+	seen := map[string]bool{}
+	for _, p := range live.Principals {
+		if p.Streams > 0 && p.RxBytes > 0 && p.TxBytes > 0 && p.UserID == "user_a" {
+			seen[p.Kind+":"+p.ID] = true
+		}
+	}
+	if !seen["device:device_a"] || !seen["connector:connector_a"] || live.Totals.RxBytes == 0 || strings.Contains(liveRecorder.Body.String(), p.Credentials["device_proxy"].Value) {
+		t.Fatal("live statistics missing streams or leaking credentials", liveRecorder.Body.String())
+	}
+	serviceStream := false
+	for _, s := range live.Streams {
+		serviceStream = serviceStream || (s.Principal == "device_a" && s.Kind == "service" && s.ServiceID == "service_a")
+	}
+	if !serviceStream {
+		t.Fatal("live statistics missing the device service stream", liveRecorder.Body.String())
+	}
 	// Register a service while A remains an established TCP/TLS/frp stream.
 	portB := freePort(t)
 	p.Policies[0].Services = append(p.Policies[0].Services, managedService{"service_b", "connector_a", portB})

@@ -87,6 +87,9 @@ func (f *Frontend) handle(connection net.Conn) {
 			connection.Close()
 			return
 		}
+		local := upstream.LocalAddr().String()
+		frontendPeers.Store(local, connection.RemoteAddr().String())
+		defer frontendPeers.Delete(local)
 		splice(replay, upstream)
 		return
 	}

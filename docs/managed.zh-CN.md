@@ -22,6 +22,10 @@ API 的 baseRevision 标识节点传输身份，policyRevision 标识 userPolici
 
 managed 模式支持 API 当前生成的 TCP/TLS VLESS 配置，不启用 UDP、VLESS 多路复用或 Vision；旧 sing-box 模式的能力不变。证书更新钩子可重启服务；frp 进程日志只在首次启动初始化，日志参数变更需要进程重启。
 
+## 实时统计
+
+机器认证的 status 主机在 `/health` 旁提供 `GET /live`（同样使用 `Authorization: Bearer <machine token>`）。返回当前有连接的设备和 Connector（类型、所属用户 ID、连接数、真实来源 IP、最早连接时间）、最多 500 条单独连接（服务或 Connector 控制通道、来源地址、开始时间），以及自进程启动以来按身份和整节点累计的字节数。`rxBytes` 是客户端发往 Relay 的字节，`txBytes` 是 Relay 发往客户端的字节；速率由调用方根据两次采样计算。不包含凭据和传输内容。管理后台通过 API 的 `GET /v1/adminzzz/relay/nodes/{nodeId}/live` 读取。
+
 ## 验证与限制
 
 运行 `go test ./...`、`go vet ./...`、`go test -race ./...`。真实链路使用原生 sing-box App/Connector 与 frp，在同一条持续收发连接中执行服务/设备/账号新增、授权撤销、服务删除、设备凭据轮换，检查无关连接存活、对应连接关闭、端口释放以及组件身份保留。

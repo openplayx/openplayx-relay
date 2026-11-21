@@ -18,15 +18,16 @@ import (
 	"time"
 )
 
-//go:embed web/index.html web/app.js web/style.css web/opx-theme.js
+//go:embed web/index.html web/app.js web/style.css web/opx-theme.js web/opx-i18n.js
 var webAssets embed.FS
 
 var staticFiles = map[string][2]string{
 	"/":          {"web/index.html", "text/html; charset=utf-8"},
 	"/app.js":    {"web/app.js", "text/javascript; charset=utf-8"},
 	"/style.css": {"web/style.css", "text/css; charset=utf-8"},
-	// Theme script copied from the OpenPlayX UI kit (openplayx/web ui/opx-theme.js).
+	// Theme and language scripts copied from the OpenPlayX UI kit (openplayx/web ui/).
 	"/opx-theme.js": {"web/opx-theme.js", "text/javascript; charset=utf-8"},
+	"/opx-i18n.js":  {"web/opx-i18n.js", "text/javascript; charset=utf-8"},
 }
 
 const contentSecurityPolicy = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
@@ -171,6 +172,9 @@ func (m *ManagerServer) requestOrigins(peer, local, authority string) (map[strin
 
 func (m *ManagerServer) reply(w http.ResponseWriter, status int, value any, extra map[string]string) {
 	data, _ := json.Marshal(value)
+	if locale, ok := w.(*localeWriter); ok && locale.english {
+		data = localizeJSON(data)
+	}
 	m.send(w, status, data, "application/json; charset=utf-8", extra)
 }
 
@@ -265,6 +269,7 @@ func (m *ManagerServer) authenticate(r *http.Request, write bool) (string, sessi
 }
 
 func (m *ManagerServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w = &localeWriter{ResponseWriter: w, english: prefersEnglish(r)}
 	// URLs, login fields and secrets never enter logs.
 	defer func() {
 		if recover() != nil {
@@ -300,6 +305,10 @@ func (m *ManagerServer) handle(w http.ResponseWriter, r *http.Request, write boo
 		return err
 	}
 	path := r.RequestURI
+	if path == "/i18n.js" && !write {
+		m.send(w, 200, i18nScript, "text/javascript; charset=utf-8", nil)
+		return nil
+	}
 	if asset, static := staticFiles[path]; !write && static {
 		content, err := webAssets.ReadFile(asset[0])
 		if err != nil {

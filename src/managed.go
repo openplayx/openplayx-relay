@@ -249,8 +249,12 @@ func (m *managedAgent) plan(p managedProfile) (*managedPlan, map[string]managedI
 
 func (m *managedAgent) plugin(w http.ResponseWriter, r *http.Request) { m.runtime.plugin(w, r) }
 func (m *managedAgent) health(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/health" || r.Host != "status."+m.config.Host || !managedEqual(r.Header.Get("Authorization"), "Bearer "+m.config.MachineToken) {
+	if (r.URL.Path != "/health" && r.URL.Path != "/live") || r.Host != "status."+m.config.Host || !managedEqual(r.Header.Get("Authorization"), "Bearer "+m.config.MachineToken) {
 		http.NotFound(w, r)
+		return
+	}
+	if r.URL.Path == "/live" {
+		m.live(w)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

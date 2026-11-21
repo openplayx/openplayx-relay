@@ -37,8 +37,9 @@ type managedRoute struct {
 	Token              string
 }
 type managedPrincipal struct {
-	Auth   managedAuth
-	Routes map[int]managedRoute
+	Auth         managedAuth
+	Routes       map[int]managedRoute
+	Kind, UserID string
 }
 type managedSnapshot struct {
 	principals map[string]managedPrincipal
@@ -60,6 +61,10 @@ type managedStream struct {
 	mu       sync.Mutex
 	upstream net.Conn
 	done     chan struct{}
+	// Live statistics; remote is the real peer address of the client.
+	remote    string
+	startedAt time.Time
+	traffic   managedTraffic
 }
 
 func (s *managedStream) close() {
@@ -83,10 +88,12 @@ type managedDataPlane struct {
 	servers       map[string]*managedServer
 	streams       map[*managedStream]bool
 	stopped       bool
+	traffic       map[string]*managedTraffic // per principal, since process start
+	totals        managedTraffic
 }
 
 func newManagedDataPlane(config managedConfig) *managedDataPlane {
-	return &managedDataPlane{config: config, servers: map[string]*managedServer{}, streams: map[*managedStream]bool{}}
+	return &managedDataPlane{config: config, servers: map[string]*managedServer{}, streams: map[*managedStream]bool{}, traffic: map[string]*managedTraffic{}}
 }
 func (d *managedDataPlane) Components() map[string]string {
 	d.mu.Lock()
@@ -134,9 +141,9 @@ func (d *managedDataPlane) compile(p managedProfile, identities map[string]manag
 	users := []managedAuth{}
 	uuids := []string{}
 	flows := []string{}
-	add := func(id, ref string, routes map[int]managedRoute) {
+	add := func(id, ref, kind, userID string, routes map[int]managedRoute) {
 		a := managedAuth{id, p.Credentials[ref].Value}
-		s.principals[id] = managedPrincipal{a, routes}
+		s.principals[id] = managedPrincipal{a, routes, kind, userID}
 		users = append(users, a)
 		uuids = append(uuids, a.UUID)
 		flows = append(flows, "")
@@ -152,7 +159,7 @@ func (d *managedDataPlane) compile(p managedProfile, identities map[string]manag
 		}
 		for _, c := range policy.Connectors {
 			server := servers[c.ConnectorID]
-			add(c.ConnectorID, c.ProxyRef, map[int]managedRoute{7000: {Service: "control:" + c.ConnectorID, Connector: c.ConnectorID, Port: server.port, Token: server.token}})
+			add(c.ConnectorID, c.ProxyRef, "connector", policy.UserID, map[int]managedRoute{7000: {Service: "control:" + c.ConnectorID, Connector: c.ConnectorID, Port: server.port, Token: server.token}})
 		}
 		for _, device := range policy.Devices {
 			routes := map[int]managedRoute{}
@@ -160,7 +167,7 @@ func (d *managedDataPlane) compile(p managedProfile, identities map[string]manag
 				svc := services[id]
 				routes[svc.RemotePort] = managedRoute{Service: id, Connector: svc.ConnectorID, Port: svc.RemotePort, Token: servers[svc.ConnectorID].token}
 			}
-			add(device.DeviceID, device.ProxyRef, routes)
+			add(device.DeviceID, device.ProxyRef, "device", policy.UserID, routes)
 		}
 	}
 	s.protocol = vless.NewService[managedAuth](logger.NOP(), d)
@@ -303,6 +310,13 @@ func (d *managedDataPlane) Apply(p managedProfile, plan *managedPlan, identities
 			revoked = append(revoked, stream)
 		}
 	}
+	// Forget counters of principals removed from policy; a revoked stream
+	// still draining keeps counting into its own (now detached) counter.
+	for id := range d.traffic {
+		if _, ok := snapshot.principals[id]; !ok {
+			delete(d.traffic, id)
+		}
+	}
 	d.mu.Unlock()
 	for _, stream := range revoked {
 		stream.close()
@@ -390,8 +404,9 @@ func (d *managedDataPlane) NewConnectionEx(ctx context.Context, conn net.Conn, s
 		raw.Close()
 		return
 	}
-	stream := &managedStream{auth: a, route: route, raw: raw, cancel: cancel, done: make(chan struct{})}
+	stream := &managedStream{auth: a, route: route, raw: raw, cancel: cancel, done: make(chan struct{}), remote: frontendPeer(raw), startedAt: time.Now()}
 	d.streams[stream] = true
+	counted := &countingConn{Conn: conn, counters: []*managedTraffic{&stream.traffic, d.principalTraffic(a.ID), &d.totals}}
 	d.mu.Unlock()
 	defer func() {
 		stream.close()
@@ -417,7 +432,7 @@ func (d *managedDataPlane) NewConnectionEx(ctx context.Context, conn net.Conn, s
 		return
 	}
 	_ = raw.SetDeadline(time.Time{})
-	splice(conn, upstream)
+	splice(counted, upstream)
 }
 func (d *managedDataPlane) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, source, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
 	conn.Close()

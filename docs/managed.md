@@ -19,6 +19,10 @@ A transaction gate spans frp plugin approval through proxy binding. Policy commi
 
 New handshakes revalidate their authenticated identity and destination against the current snapshot. A handshake or pending dial that overlaps revocation cannot resurrect removed access. Invalid updates and revision rollback retain the last applied policy. Freshness timestamps never stop forwarding. Phones test and choose a fixed node; policy polling never switches that choice.
 
+## Live statistics
+
+The machine-authenticated status host serves `GET /live` next to `/health` (same `Authorization: Bearer <machine token>`). It reports each device and Connector with open streams (kind, owning user ID, stream count, real peer IPs, connected-since), up to 500 individual streams (service or Connector control, remote address, start time) and cumulative byte counters per principal and for the node since process start. `rxBytes` is what the client sent to the Relay, `txBytes` what the Relay sent to the client. Rates are derived by the caller from two samples. Credentials and payload are never included. The admin console reads it through the API's `GET /v1/adminzzz/relay/nodes/{nodeId}/live`.
+
 ## Verification
 
 Run `cd src && go test ./...`, `go vet ./...`, and `go test -race ./...`. Real tests use native sing-box App/Connector clients and frp with a continuously transmitting TCP stream while registering services/devices/accounts, revoking grants, deleting a service and rotating a device UUID. They verify listener/control identity retention, targeted disconnects and immediate service-port release.
