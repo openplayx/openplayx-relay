@@ -1,6 +1,6 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OpenPlayX · 远程访问管理</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
-<body><header><div><span class="brand">OpenPlayX</span><h1 id="title">远程访问管理</h1><p>传输链路与可用服务</p></div><button id="logout" hidden>退出</button></header>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OpenPlayX · 远程访问管理</title><meta name="color-scheme" content="light dark"><link rel="stylesheet" href="/style.css"><script src="/opx-theme.js"></script><script src="/app.js" defer></script></head>
+<body><header><div><span class="brand">OpenPlayX</span><h1 id="title">远程访问管理</h1><p>传输链路与可用服务</p></div><div class="header-actions"><button type="button" class="theme-toggle" data-theme-toggle aria-label="切换主题"></button><button id="logout" hidden>退出</button></div></header>
 <main>
 <section id="login"><h2>管理员登录</h2><p>首次登录使用本机私有配置目录中的 bootstrap-token，15 分钟内有效。</p><label>管理员密码或初始化凭据<input id="password" type="password" autocomplete="current-password" maxlength="1024"></label><button id="login-button">登录</button></section>
 <section id="account" hidden><h2>设置管理员密码</h2><p>请设置至少 16 个字符的独立管理密码。设置后会退出所有会话。</p><label>新密码<input id="new-password" type="password" autocomplete="new-password" minlength="16" maxlength="256"></label><button id="password-button">设置密码</button></section>
